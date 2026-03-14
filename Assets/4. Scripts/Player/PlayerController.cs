@@ -6,6 +6,8 @@ public class PlayerController : NetworkBehaviour
 {
     [Header("Movement Settings")]
     public float moveSpeed = 5f;
+    public float sprintSpeed = 10f;
+    private float _currentSpeed;
     public float lookSpeed = 2f;
     public float gravity = -9.81f; // 추가: 중력 값
 
@@ -52,6 +54,31 @@ public class PlayerController : NetworkBehaviour
         }
     }
 
+    // 플레이어 이동/조작 스크립트에 작성 (기존 OnStartClient 쪽 내용은 지워주세요!)
+    public override void OnStartServer()
+    {
+        base.OnStartServer();
+
+        // 서버(방장)가 직접 스포너를 찾아서, 방금 스폰된 이 캐릭터를 꽂아 넣습니다.
+        WaveSpawner spawner = FindFirstObjectByType<WaveSpawner>();
+
+        if (spawner != null)
+        {
+            spawner.RegisterPlayer(transform);
+        }
+    }
+
+    // (선택) 플레이어가 게임을 끄거나 나갔을 때 리스트에서 빼주는 기능
+    public override void OnStopServer()
+    {
+        base.OnStopServer();
+        WaveSpawner spawner = FindFirstObjectByType<WaveSpawner>();
+        if (spawner != null)
+        {
+            spawner.UnregisterPlayer(transform);
+        }
+    }
+
     void Update()
     {
         if (!IsOwner) return;
@@ -68,8 +95,10 @@ public class PlayerController : NetworkBehaviour
 
         Vector3 move = transform.right * moveX + transform.forward * moveZ;
 
+        _currentSpeed = Input.GetKey(KeyCode.LeftShift) ? sprintSpeed : moveSpeed;
+
         // Transform 대신 CharacterController의 Move 함수 사용
-        characterController.Move(move * moveSpeed * Time.deltaTime);
+        characterController.Move(move * _currentSpeed * Time.deltaTime);
 
         // 2. 수직 이동 (중력)
         // 캐릭터가 땅에 닿아있고, 아래로 떨어지는 중이라면 수직 속도를 살짝만 유지하여 바닥에 밀착시킵니다.

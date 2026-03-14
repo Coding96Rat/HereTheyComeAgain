@@ -12,7 +12,7 @@ public class EnvironmentGenerator : MonoBehaviour
     public float safeZoneRadius = 50f;
 
     [Header("Room Shape Settings")]
-    public int numberOfRooms = 50;
+    public int numberOfRooms = 40;
 
     public int minRoomWidth = 6;
     public int maxRoomWidth = 15;
@@ -68,7 +68,6 @@ public class EnvironmentGenerator : MonoBehaviour
                 _occupiedGrid[cell.x, cell.y] = true;
             }
 
-            // 개별 방을 관리할 부모 오브젝트 생성
             GameObject roomObject = new GameObject($"Room_{spawnedRooms + 1}");
             roomObject.transform.SetParent(environmentParent);
 
@@ -76,7 +75,7 @@ public class EnvironmentGenerator : MonoBehaviour
             spawnedRooms++;
         }
 
-        Debug.Log($"[Map Gen] 생성 완료. 총 방 개수: {spawnedRooms}");
+        Debug.Log($"[Map Gen] 맵 생성 완료. 핵심 요충지(방) 개수: {spawnedRooms}");
     }
 
     public void ClearEnvironment()
@@ -105,7 +104,6 @@ public class EnvironmentGenerator : MonoBehaviour
         if (Random.value < 0.7f) AddCompositeRect(cells, startX, startZ, w1, h1);
         if (Random.value < 0.3f) AddCompositeRect(cells, startX, startZ, w1, h1);
 
-        // 맵 가장자리 밀어넣기 로직
         int minX = int.MaxValue, maxX = int.MinValue;
         int minZ = int.MaxValue, maxZ = int.MinValue;
 
@@ -166,7 +164,6 @@ public class EnvironmentGenerator : MonoBehaviour
         }
     }
 
-    // 테두리(Boundary) 선을 직접 파악하여 안팎 코너를 모두 잡아내는 로직
     private bool IsCorner(Vector2Int cell, HashSet<Vector2Int> boundaryCells)
     {
         bool u = boundaryCells.Contains(cell + Vector2Int.up);
@@ -324,9 +321,14 @@ public class EnvironmentGenerator : MonoBehaviour
             }
         }
 
-        // 벽 병합 최적화 및 인스턴스화
+        InstantiateMergedWalls(boundaryCells, gridSystem, roomTransform);
+    }
+
+    private void InstantiateMergedWalls(HashSet<Vector2Int> cells, GridSystem gridSystem, Transform parentTransform)
+    {
+        HashSet<Vector2Int> wallCells = new HashSet<Vector2Int>(cells);
         List<RectInt> mergedWalls = new List<RectInt>();
-        List<Vector2Int> sortedBounds = boundaryCells.ToList();
+        List<Vector2Int> sortedBounds = wallCells.ToList();
 
         sortedBounds.Sort((a, b) => {
             if (a.y != b.y) return a.y.CompareTo(b.y);
@@ -335,21 +337,21 @@ public class EnvironmentGenerator : MonoBehaviour
 
         foreach (var cell in sortedBounds)
         {
-            if (!boundaryCells.Contains(cell)) continue;
+            if (!wallCells.Contains(cell)) continue;
 
             int spanX = 1;
-            while (boundaryCells.Contains(new Vector2Int(cell.x + spanX, cell.y))) { spanX++; }
+            while (wallCells.Contains(new Vector2Int(cell.x + spanX, cell.y))) { spanX++; }
 
             if (spanX > 1)
             {
-                for (int i = 0; i < spanX; i++) boundaryCells.Remove(new Vector2Int(cell.x + i, cell.y));
+                for (int i = 0; i < spanX; i++) wallCells.Remove(new Vector2Int(cell.x + i, cell.y));
                 mergedWalls.Add(new RectInt(cell.x, cell.y, spanX, 1));
             }
             else
             {
                 int spanY = 1;
-                while (boundaryCells.Contains(new Vector2Int(cell.x, cell.y + spanY))) { spanY++; }
-                for (int i = 0; i < spanY; i++) boundaryCells.Remove(new Vector2Int(cell.x, cell.y + i));
+                while (wallCells.Contains(new Vector2Int(cell.x, cell.y + spanY))) { spanY++; }
+                for (int i = 0; i < spanY; i++) wallCells.Remove(new Vector2Int(cell.x, cell.y + i));
                 mergedWalls.Add(new RectInt(cell.x, cell.y, 1, spanY));
             }
         }
@@ -365,8 +367,7 @@ public class EnvironmentGenerator : MonoBehaviour
             Vector3 centerPos = (startPos + endPos) / 2f;
             centerPos.y = wallHalfHeight;
 
-            // 부모를 각 Room의 Transform으로 설정
-            GameObject wall = Instantiate(wallPrefab, centerPos, Quaternion.identity, roomTransform);
+            GameObject wall = Instantiate(wallPrefab, centerPos, Quaternion.identity, parentTransform);
             wall.transform.localScale = new Vector3(rect.width * cellSize, wallHeight, rect.height * cellSize);
         }
     }

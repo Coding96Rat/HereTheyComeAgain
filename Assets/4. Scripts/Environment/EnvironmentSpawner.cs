@@ -20,29 +20,30 @@ public class EnvironmentSpawner : MonoBehaviour
 
     private void CreateGround()
     {
-        // 1. 바닥 생성
+        // 1. 바닥 중심점 계산
         GameObject gObj = Instantiate(GroundBasePrefab, this.transform);
         float width = _gridSystem.Columns * _gridSystem.CellSize;
         float height = _gridSystem.Rows * _gridSystem.CellSize;
+
+        // 위치는 맵의 정중앙에 배치합니다.
         gObj.transform.position = _gridSystem.LeftBottomLocation + new Vector3(width / 2, 0, height / 2);
 
-        // 2. 크기(Scale) 자동 맞춤
-        // Plane은 Scale 1 = 10 단위이므로 10으로 나눕니다.
-        float scaleX = (_gridSystem.Columns * _gridSystem.CellSize) / 10f;
-        float scaleZ = (_gridSystem.Rows * _gridSystem.CellSize) / 10f;
+        // 2. 크기(Scale) 2배 적용
+        // Plane은 Scale 1 = 10 단위이므로 10으로 나눕니다. 추가로 전체 크기를 2배(2f)로 늘립니다.
+        float scaleX = (width * 2f) / 10f;
+        float scaleZ = (height * 2f) / 10f;
         gObj.transform.localScale = new Vector3(scaleX, 1, scaleZ);
 
         // 3. 머티리얼 Tiling 자동 맞춤
         Renderer groundRenderer = gObj.GetComponent<Renderer>();
         if (groundRenderer != null)
         {
-            // 총 길이를 커버리지(50)로 나누어 최적의 타일링 값을 구함
-            float tilingX = (_gridSystem.Columns * _gridSystem.CellSize) / _textureCoverage;
-            float tilingY = (_gridSystem.Rows * _gridSystem.CellSize) / _textureCoverage;
+            // 크기가 2배 늘어났으므로, 텍스처 타일링도 2배로 계산하여 해상도를 유지합니다.
+            float tilingX = (width * 2f) / _textureCoverage;
+            float tilingY = (height * 2f) / _textureCoverage;
 
             // 머티리얼의 메인 텍스처 타일링 값 적용
             groundRenderer.material.mainTextureScale = new Vector2(tilingX, tilingY);
         }
     }
-
 }

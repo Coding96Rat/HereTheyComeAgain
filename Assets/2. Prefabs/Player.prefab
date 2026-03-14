@@ -58,7 +58,7 @@ MonoBehaviour:
   Lens:
     FieldOfView: 60.000004
     OrthographicSize: 5
-    NearClipPlane: 0.3
+    NearClipPlane: 0.01
     FarClipPlane: 1000
     Dutch: 0
     ModeOverride: 0
@@ -182,7 +182,7 @@ MonoBehaviour:
   _componentIndexCache: 255
   _addedNetworkObject: {fileID: 4200593391628528207}
   _networkObjectCache: {fileID: 0}
-  _componentConfiguration: 0
+  _componentConfiguration: 1
   _synchronizeParent: 0
   _packing:
     Position: 1
@@ -251,6 +251,7 @@ MonoBehaviour:
   _addedNetworkObject: {fileID: 4200593391628528207}
   _networkObjectCache: {fileID: 0}
   moveSpeed: 5
+  sprintSpeed: 10
   lookSpeed: 2
   gravity: -9.81
   characterController: {fileID: 7696904341346734339}
