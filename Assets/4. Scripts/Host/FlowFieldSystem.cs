@@ -11,6 +11,9 @@ public class FlowFieldSystem : MonoBehaviour
     private int[,] _integrationField;
     private bool _isUpdating = false;
 
+    // [최적화 핵심] 매번 Find를 쓰지 않기 위해 플레이어 리스트를 캐싱해둡니다.
+    private List<Transform> _targetPlayers;
+
     private static readonly Vector2Int[] neighbors = {
         Vector2Int.up, Vector2Int.down, Vector2Int.left, Vector2Int.right,
         new Vector2Int(1, 1), new Vector2Int(1, -1), new Vector2Int(-1, 1), new Vector2Int(-1, -1)
@@ -19,6 +22,8 @@ public class FlowFieldSystem : MonoBehaviour
 
     private List<Vector2Int>[] _touchedCellsPerPlayer;
     private Queue<Vector2Int> _bfsQueue = new Queue<Vector2Int>(5000);
+
+
 
     private void Awake()
     {
@@ -48,6 +53,9 @@ public class FlowFieldSystem : MonoBehaviour
 
     public void StartUpdatingFlowFields(List<Transform> activePlayers)
     {
+        // 웨이브가 시작될 때 받아온 플레이어 리스트를 저장해둡니다 (참조 최적화 O(1))
+        _targetPlayers = activePlayers;
+
         if (!_isUpdating)
         {
             _isUpdating = true;
@@ -67,7 +75,7 @@ public class FlowFieldSystem : MonoBehaviour
                 // 플레이어 1명씩 완전히 독립된 코루틴으로 계산을 위임합니다.
                 yield return StartCoroutine(GenerateFlowFieldForPlayerRoutine(new Vector2Int(pX, pZ), i));
             }
-            // [유저 아이디어 적용] 0.25초가 아닌 2.5초 간격으로 플레이어의 '과거 스냅샷 좌표'를 갱신
+            // [유저 아이디어 적용] 2.5초 간격으로 플레이어의 '과거 스냅샷 좌표'를 갱신
             yield return new WaitForSeconds(2.5f);
         }
     }
@@ -163,5 +171,18 @@ public class FlowFieldSystem : MonoBehaviour
         _gridSystem.GetGridPosition(worldPos, out int x, out int z);
         if (x >= 0 && x < _cols && z >= 0 && z < _rows) return _playerFlowFields[targetIndex][x, z];
         return Vector3.zero;
+    }
+
+    // 타겟 플레이어의 현재 실제 좌표를 반환하는 함수 (O(1) 최적화 검색)
+    public Vector3 GetTargetPlayerPosition(int targetIndex)
+    {
+        // 방어 로직: 리스트가 아직 없거나, 인덱스 번호가 잘못되었거나, 플레이어가 죽어서 사라졌을 경우
+        if (_targetPlayers == null || targetIndex < 0 || targetIndex >= _targetPlayers.Count || _targetPlayers[targetIndex] == null)
+        {
+            return Vector3.zero;
+        }
+
+        // 저장해둔 리스트에서 다이렉트로 위치를 뽑아줍니다.
+        return _targetPlayers[targetIndex].position;
     }
 }

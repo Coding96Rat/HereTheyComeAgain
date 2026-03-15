@@ -60,11 +60,11 @@ public class PlayerController : NetworkBehaviour
         base.OnStartServer();
 
         // 서버(방장)가 직접 스포너를 찾아서, 방금 스폰된 이 캐릭터를 꽂아 넣습니다.
-        WaveSpawner spawner = FindFirstObjectByType<WaveSpawner>();
+        EnemyMother eMother = FindFirstObjectByType<EnemyMother>();
 
-        if (spawner != null)
+        if (eMother != null)
         {
-            spawner.RegisterPlayer(transform);
+            eMother.RegisterPlayer(transform);
         }
     }
 
@@ -72,10 +72,10 @@ public class PlayerController : NetworkBehaviour
     public override void OnStopServer()
     {
         base.OnStopServer();
-        WaveSpawner spawner = FindFirstObjectByType<WaveSpawner>();
-        if (spawner != null)
+        EnemyMother eMother = FindFirstObjectByType<EnemyMother>();
+        if (eMother != null)
         {
-            spawner.UnregisterPlayer(transform);
+            eMother.UnregisterPlayer(transform);
         }
     }
 
