@@ -55,28 +55,22 @@ public class PlayerController : NetworkBehaviour
     }
 
     // 플레이어 이동/조작 스크립트에 작성 (기존 OnStartClient 쪽 내용은 지워주세요!)
+    // [수정됨] 플레이어가 스폰될 때 자동으로 타겟 리스트에 합류합니다.
     public override void OnStartServer()
     {
         base.OnStartServer();
 
-        // 서버(방장)가 직접 스포너를 찾아서, 방금 스폰된 이 캐릭터를 꽂아 넣습니다.
-        EnemyMother eMother = FindFirstObjectByType<EnemyMother>();
-
-        if (eMother != null)
-        {
-            eMother.RegisterPlayer(transform);
-        }
+        // static 함수로 바뀌었기 때문에 FindObject를 쓸 필요 없이 한 줄로 쏙 들어갑니다! (극한의 최적화)
+        EnemyMother.RegisterTarget(transform);
     }
 
-    // (선택) 플레이어가 게임을 끄거나 나갔을 때 리스트에서 빼주는 기능
+    // [수정됨] 플레이어가 게임을 끄거나 나갔을 때 리스트에서 빼주는 기능
     public override void OnStopServer()
     {
         base.OnStopServer();
-        EnemyMother eMother = FindFirstObjectByType<EnemyMother>();
-        if (eMother != null)
-        {
-            eMother.UnregisterPlayer(transform);
-        }
+
+        // 나갈 때도 깔끔하게 한 줄로 제거!
+        EnemyMother.UnregisterTarget(transform);
     }
 
     void Update()

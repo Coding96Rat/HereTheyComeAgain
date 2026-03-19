@@ -49,6 +49,7 @@ MonoBehaviour:
   _addedNetworkObject: {fileID: 2493228017869009197}
   _networkObjectCache: {fileID: 2493228017869009197}
   enemyPrefab: {fileID: 7793947819842935884, guid: 247ba04e9624cf24abc857c02ad55d64, type: 3}
+  dedicatedTarget: {fileID: 0}
   startDelay: 5
   spawnInterval: 1
   enemiesPerSpawn: 1000
@@ -59,6 +60,8 @@ MonoBehaviour:
   separationWeight: 2
   globalEnemySpeed: 15
   globalRotationSpeed: 360
+  maxSlopeAngle: 45
+  injectedStairs: []
 --- !u!114 &2493228017869009197
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -89,7 +92,7 @@ MonoBehaviour:
   _initializeOrder: 0
   _preventDespawnOnDisconnect: 0
   _defaultDespawnType: 1
-  _initializedTimestamp: -8584279414264455511
+  _initializedTimestamp: -8584276964284562288
   NetworkObserver: {fileID: 0}
   _enablePrediction: 0
   _predictionType: 0

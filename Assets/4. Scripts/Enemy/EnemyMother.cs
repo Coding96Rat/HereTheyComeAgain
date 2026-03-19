@@ -9,7 +9,13 @@ using UnityEngine.Jobs;
 public class EnemyMother : NetworkBehaviour
 {
     public NetworkObject enemyPrefab;
-    public static List<Transform> activePlayers = new List<Transform>();
+
+    //  [수정] 플레이어와 방화벽을 모두 담는 통합 타겟 리스트
+    public static List<Transform> ValidTargets = new List<Transform>();
+
+    [Header("우선 타겟팅 (자동 할당됨)")]
+    [Tooltip("이 마더가 무조건 최우선으로 부술 타겟 (방화벽 등)")]
+    public Transform dedicatedTarget;
 
     [Header("각 웨이브 숙주 스폰 설정")]
     public float startDelay = 5f;
@@ -39,10 +45,53 @@ public class EnemyMother : NetworkBehaviour
     public float globalEnemySpeed = 3f;
     public float globalRotationSpeed = 360f;
 
-    // 쉐이더 제어용 통신 블록 (Animator 완벽 대체)
+    [Header("경사도 제한 (Slope Limit)")]
+    [Tooltip("좀비가 오를 수 있는 최대 각도 (유니티 CharacterController와 동일)")]
+    public float maxSlopeAngle = 45f;
+
+    // 스포너로부터 위치 데이터만 넘겨받을 배열 (인스펙터 노출 안 함)
+    [HideInInspector]
+    public Vector3[] injectedStairs;
+
+    // Job에 넘겨줄 계단 위치 배열
+    private NativeArray<Vector3> _stairPositions;
+
+    // 쉐이더 제어용 통신 블록
     private MaterialPropertyBlock _mpb;
     private readonly int _isWalkingHash = Shader.PropertyToID("_IsWalking");
     private readonly int _timeOffsetHash = Shader.PropertyToID("_TimeOffset");
+
+    #region 타겟 관리 시스템 (Target Management)
+    public static void RegisterTarget(Transform target)
+    {
+        if (!ValidTargets.Contains(target)) ValidTargets.Add(target);
+    }
+
+    public static void UnregisterTarget(Transform target)
+    {
+        if (ValidTargets.Contains(target)) ValidTargets.Remove(target);
+    }
+
+    //  특정 위치에서 가장 가까운 살아있는 타겟을 찾아주는 함수
+    public static Transform GetClosestTarget(Vector3 searchPos)
+    {
+        Transform closest = null;
+        float minDist = float.MaxValue;
+
+        for (int i = 0; i < ValidTargets.Count; i++)
+        {
+            if (ValidTargets[i] == null || !ValidTargets[i].gameObject.activeInHierarchy) continue;
+
+            float dist = (ValidTargets[i].position - searchPos).sqrMagnitude;
+            if (dist < minDist)
+            {
+                minDist = dist;
+                closest = ValidTargets[i];
+            }
+        }
+        return closest;
+    }
+    #endregion
 
     #region O(1) 리스트 관리 시스템 (Job System 연동)
     public void AddEnemy(Enemy enemy)
@@ -54,7 +103,6 @@ public class EnemyMother : NetworkBehaviour
         _transformAccessArray.Add(enemy.transform);
         _targetPositions[newIndex] = enemy.GetTargetPosition();
 
-        // 몬스터 스폰 시 랜덤 발걸음 부여 및 정지 상태로 세팅
         if (enemy.myRenderer != null)
         {
             enemy.myRenderer.GetPropertyBlock(_mpb);
@@ -66,8 +114,6 @@ public class EnemyMother : NetworkBehaviour
 
     public void RemoveEnemy(Enemy enemy)
     {
-
-        // [에러 폭탄 방지] 씬 종료 시 Mother가 먼저 파괴되어 배열이 해제된 경우 접근 차단!
         if (!_transformAccessArray.isCreated) return;
 
         _movementJobHandle.Complete();
@@ -110,7 +156,9 @@ public class EnemyMother : NetworkBehaviour
 
         _groundQueryParams = new QueryParameters(LayerMask.GetMask("Ground"), false, QueryTriggerInteraction.Ignore, false);
 
-        _mpb = new MaterialPropertyBlock(); // 초기화
+        _mpb = new MaterialPropertyBlock();
+
+        
     }
 
     private void OnDestroy()
@@ -123,41 +171,40 @@ public class EnemyMother : NetworkBehaviour
         if (_yVelocities.IsCreated) _yVelocities.Dispose();
         if (_currentPositions.IsCreated) _currentPositions.Dispose();
         if (_animStates.IsCreated) _animStates.Dispose();
+        if(_stairPositions.IsCreated) _stairPositions.Dispose();    
     }
 
-    // 네트워크가 시작될 때 FishNet 공식 API를 사용하여 깔끔하게 메모리에 올려둡니다.
-    // 1. 오직 서버만: 서버용 주머니를 채우고 스폰 시작!
     public override void OnStartServer()
     {
         base.OnStartServer();
 
-        // 서버용 주머니 예열 (asServer: true) -> 이걸 해야 SpawnEnemy에서 Instantiate(GC)가 발생하지 않습니다!
-        base.NetworkManager.ObjectPool.CacheObjects(enemyPrefab, maxActiveEnemies, true);
-        Debug.Log("<color=cyan>[서버 주머니 준비 완료]</color>");
+        // [핵심] 스포너가 데이터를 주입해준 직후인 여기서 NativeArray를 딱 한 번 할당합니다!
+        if (injectedStairs != null && injectedStairs.Length > 0)
+        {
+            _stairPositions = new NativeArray<Vector3>(injectedStairs.Length, Allocator.Persistent);
+            for (int i = 0; i < injectedStairs.Length; i++)
+            {
+                _stairPositions[i] = injectedStairs[i];
+            }
+        }
+        else
+        {
+            // 계단이 아예 없을 경우를 대비한 빈 배열 안전장치
+            _stairPositions = new NativeArray<Vector3>(0, Allocator.Persistent);
+        }
 
+        base.NetworkManager.ObjectPool.CacheObjects(enemyPrefab, maxActiveEnemies, true);
         StartCoroutine(SpawnWaveRoutine());
     }
 
-    // 2. 클라이언트: 클라이언트 화면용 주머니를 채우기!
     public override void OnStartClient()
     {
         base.OnStartClient();
-
-        // 클라이언트용 주머니 예열 (asServer: false) -> 이걸 해야 화면에 몬스터가 짠! 하고 나타날 때 렉이 안 걸립니다!
         base.NetworkManager.ObjectPool.CacheObjects(enemyPrefab, maxActiveEnemies, false);
-        Debug.Log("<color=lime>[클라이언트 주머니 준비 완료]</color>");
     }
 
-    public void RegisterPlayer(Transform playerTransform)
-    {
-        if (!activePlayers.Contains(playerTransform)) activePlayers.Add(playerTransform);
-    }
-
-    public void UnregisterPlayer(Transform playerTransform)
-    {
-        if (activePlayers.Contains(playerTransform)) activePlayers.Remove(playerTransform);
-    }
-
+    // 1. Update (프레임 시작): 
+    // 가장 먼저 백그라운드 스레드에 4000마리 연산을 던져놓습니다! (메인 스레드는 대기하지 않고 지나감)
     private void Update()
     {
         if (Enemies.Count == 0) return;
@@ -185,44 +232,54 @@ public class EnemyMother : NetworkBehaviour
             RaycastHits = _raycastHits,
             YVelocities = _yVelocities,
             AllEnemyPositions = _currentPositions,
-            AnimStates = _animStates, // 애니 상태 계산!
+            StairPositions = _stairPositions,
+            AnimStates = _animStates,
             DeltaTime = Time.deltaTime,
             Speed = globalEnemySpeed,
             RotationSpeed = globalRotationSpeed,
             Gravity = -9.81f,
             PivotOffset = 1.0f,
             SeparationRadius = separationRadius,
-            SeparationWeight = separationWeight
+            SeparationWeight = separationWeight,
+            SlopeThreshold = Mathf.Cos(maxSlopeAngle * Mathf.Deg2Rad)
         };
 
+        // Job을 던져놓고 즉시 빠져나갑니다. 이제 백그라운드 스레드가 땀 뻘뻘 흘리며 일하기 시작합니다!
         _movementJobHandle = moveJob.Schedule(_transformAccessArray, raycastHandle);
     }
 
+    // 2. LateUpdate (렌더링 직전): 
+    // 다른 스크립트(네트워크, 플레이어 컨트롤러 등)가 다 실행될 동안 벌어둔 시간 덕분에, 
+    // 여기서 Complete를 부르면 대기 시간(Wait)이 0ms에 가깝게 증발합니다!
     private void LateUpdate()
     {
+        if (Enemies.Count == 0) return;
+
+        // "Job 계산 다 끝났니?" -> (이미 다른 일 하는 동안 백그라운드에서 끝내놨음!) -> 대기 없음!
         _movementJobHandle.Complete();
 
-        if (!IsClientInitialized) return;
-
-        // 4000마리의 쉐이더에게 걷기(1) / 멈춤(0) 상태를 일괄 전송!
-        for (int i = 0; i < Enemies.Count; i++)
+        // 위치가 확정되었으니, 시각적 애니메이션을 동기화하고 렌더러로 넘겨줍니다.
+        if (IsClientInitialized)
         {
-            Enemy enemy = Enemies[i];
-            if (enemy.myRenderer == null) continue;
-
-            float isWalking = _animStates[i];
-
-            // [극한의 최적화] 상태가 변했을 때만(0 -> 1 또는 1 -> 0) PropertyBlock을 업데이트합니다!
-            if (enemy.lastAnimState != isWalking)
+            for (int i = 0; i < Enemies.Count; i++)
             {
-                enemy.lastAnimState = isWalking; // 상태 갱신
+                Enemy enemy = Enemies[i];
+                if (enemy.myRenderer == null) continue;
 
-                enemy.myRenderer.GetPropertyBlock(_mpb);
-                _mpb.SetFloat(_isWalkingHash, isWalking);
-                enemy.myRenderer.SetPropertyBlock(_mpb);
+                float isWalking = _animStates[i];
+
+                if (enemy.lastAnimState != isWalking)
+                {
+                    enemy.lastAnimState = isWalking;
+                    enemy.myRenderer.GetPropertyBlock(_mpb);
+                    _mpb.SetFloat(_isWalkingHash, isWalking);
+                    enemy.myRenderer.SetPropertyBlock(_mpb);
+                }
             }
         }
     }
+
+
 
     private IEnumerator SpawnWaveRoutine()
     {
@@ -232,29 +289,33 @@ public class EnemyMother : NetworkBehaviour
 
     private IEnumerator SpawnEnemy()
     {
-        // new를 한 번만 해서 변수에 담아두고 계속 재사용합니다! (GC Zero)
         WaitForSeconds wait01 = new WaitForSeconds(0.01f);
 
         for (int i = 0; i < enemiesPerSpawn; i++)
         {
-            // [핵심 안전장치] 현재 몬스터 수가 최대치(1000)에 도달했으면 스폰을 즉시 중단합니다!
-            if (Enemies.Count >= maxActiveEnemies)
-            {
-                // 이번 스폰 타이밍은 포기하고 반복문을 빠져나감 (나중에 좀비가 죽어서 자리가 비면 다시 스폰됨)
-                break;
-            }
+            if (Enemies.Count >= maxActiveEnemies) break;
 
             NetworkObject pooledEnemy = base.NetworkManager.GetPooledInstantiated(enemyPrefab, GetSpawnPointFromMom(), Quaternion.identity, true);
 
             if (pooledEnemy.TryGetComponent(out Enemy simpleEnemy))
             {
-                Transform target = activePlayers.Count > 0 ? activePlayers[Enemies.Count % activePlayers.Count] : null;
+                Transform target = null;
+
+                //  1. 전용 방화벽이 살아있다면 무조건 돌격!
+                if (dedicatedTarget != null && dedicatedTarget.gameObject.activeInHierarchy)
+                {
+                    target = dedicatedTarget;
+                }
+                else
+                {
+                    //  2. 방화벽이 파괴되었다면 가장 가까운 타겟(플레이어, 다른 건물)을 탐색!
+                    target = GetClosestTarget(transform.position);
+                }
+
                 simpleEnemy.InitializeEnemy(this, target);
             }
 
             ServerManager.Spawn(pooledEnemy);
-
-            // 변수를 재사용하여 쓰레기 발생을 원천 차단!
             yield return wait01;
         }
     }
