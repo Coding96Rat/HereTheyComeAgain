@@ -1,5 +1,6 @@
-using Unity.Burst;
+ï»¿using Unity.Burst;
 using Unity.Collections;
+using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Jobs;
 
@@ -9,7 +10,7 @@ public struct EnemyMovementJob : IJobParallelForTransform
     [ReadOnly] public NativeArray<Vector3> TargetPositions;
     [ReadOnly] public NativeArray<RaycastHit> RaycastHits;
     [ReadOnly] public NativeArray<Vector3> AllEnemyPositions;
-    [ReadOnly] public NativeArray<Vector3> StairPositions;
+    [ReadOnly] public NativeParallelMultiHashMap<int, int> SpatialGrid;
 
     public NativeArray<float> YVelocities;
     public NativeArray<int> AnimStates;
@@ -18,242 +19,164 @@ public struct EnemyMovementJob : IJobParallelForTransform
     [ReadOnly] public float Speed;
     [ReadOnly] public float RotationSpeed;
     [ReadOnly] public float Gravity;
-    [ReadOnly] public float PivotOffset;
     [ReadOnly] public float SeparationRadius;
     [ReadOnly] public float SeparationWeight;
-    [ReadOnly] public float SlopeThreshold;
+    [ReadOnly] public float CellSize;
+    [ReadOnly] public float MaxWeightTolerance;
 
     public void Execute(int index, TransformAccess transform)
     {
         Vector3 currentPos = transform.position;
-        Vector3 finalTargetPos = TargetPositions[index];
-        RaycastHit hit = RaycastHits[index];
+        Vector3 targetPos = TargetPositions[index];
+        float dt = DeltaTime;
 
-        Vector3 toPlayerFlat = finalTargetPos - currentPos;
-        toPlayerFlat.y = 0f;
-        float distToPlayerFlatSqr = toPlayerFlat.sqrMagnitude;
+        RaycastHit downHit = RaycastHits[index * 2];
+        RaycastHit fwdHit = RaycastHits[index * 2 + 1];
 
-        bool hasStairs = StairPositions.Length > 0;
+        Vector3 toTarget = targetPos - currentPos;
+        toTarget.y = 0f;
+        Vector3 desiredDir = toTarget.sqrMagnitude > 0.001f ? toTarget.normalized : Vector3.forward;
 
-        // [¼öÁ¤ 2] °è´ÜÀ» ¹ö¸®°í ÇÃ·¹ÀÌ¾î¿¡°Ô ²ª´Â ³ôÀÌ ±âÁØÀ» 0.5m -> 0.1m·Î ÃÊÁ¤¹ĞÈ­!
-        bool targetIsHigh = (finalTargetPos.y - currentPos.y > 0.1f);
+        float trueGroundY = downHit.colliderEntityId != 0 ? downHit.point.y : -999f;
+        float targetGroundY = trueGroundY;
 
-        Vector3 activeTarget = finalTargetPos;
-        bool isTargetingPlayer = true;
-
-        if (targetIsHigh && hasStairs)
-        {
-            float minDistToStair = float.MaxValue;
-            Vector3 closestStair = currentPos;
-
-            for (int s = 0; s < StairPositions.Length; s++)
-            {
-                float d = (StairPositions[s] - currentPos).sqrMagnitude;
-                if (d < minDistToStair)
-                {
-                    minDistToStair = d;
-                    closestStair = StairPositions[s];
-                }
-            }
-
-            // [¼öÁ¤ 2] °è´Ü ²À´ë±â ¸¶Ä¿¿¡ ¿Ïº®ÇÏ°Ô µµ´ŞÇÒ ¶§(sqr 0.25 = 0.5m ¹İ°æ)±îÁö ½Ã¼± °íÁ¤!
-            if (minDistToStair > 0.25f)
-            {
-                activeTarget = closestStair;
-                isTargetingPlayer = false;
-            }
-        }
-
-        Vector3 desiredDir = activeTarget - currentPos;
-        desiredDir.y = 0f;
-        if (desiredDir.sqrMagnitude > 0.001f) desiredDir.Normalize();
-
-        bool isSteep = false;
-        float groundY = currentPos.y;
-        float heightDiff = 0f;
-
-        if (hit.colliderEntityId != 0)
-        {
-            groundY = hit.point.y + PivotOffset;
-            heightDiff = groundY - currentPos.y;
-
-            if (hit.normal.y < SlopeThreshold)
-            {
-                isSteep = true;
-            }
-        }
-
-        // [¼öÁ¤ 1] "°è´ÜÀÌ ¾ø´Âµ¥ ÇÃ·¹ÀÌ¾î°¡ À§¿¡ ÀÖ°Å³ª", "ÇÃ·¹ÀÌ¾î ¹ß¹Ø 8m ÀÌ³»·Î µµ´Ş"Çß´Ù¸é ¹«½ÄÇÏ°Ô ¹¶Ä¡±â ¸ğµå ¿Â!
-        bool shouldClump = isTargetingPlayer && (distToPlayerFlatSqr < 64.0f || (!hasStairs && targetIsHigh));
-
-        Vector3 separationForce = Vector3.zero;
+        Vector3 separation = Vector3.zero;
+        float myCarriedWeight = 0f;
         float sepRadiusSqr = SeparationRadius * SeparationRadius;
 
-        for (int i = 0; i < AllEnemyPositions.Length; i++)
+        for (int cx = -1; cx <= 1; cx++)
         {
-            if (i == index) continue;
-
-            // [ÃÊ±Ø°­ ÃÖÀûÈ­ 1] °ö¼À(sqrMagnitude)À» ÇÏ±â Àü, ´Ü¼ø »¬¼ÀÀ¸·Î °Å¸®¸¦ ±¸ÇÕ´Ï´Ù.
-            float diffX = currentPos.x - AllEnemyPositions[i].x;
-            float diffZ = currentPos.z - AllEnemyPositions[i].z;
-
-            // [ÃÊ±Ø°­ ÃÖÀûÈ­ 2] Bounding Box ÄÆ(Cut)! 
-            // °¡·Î ¶Ç´Â ¼¼·Î °Å¸®°¡ SeparationRadius(¿¹: 1.5m)º¸´Ù ¸Ö´Ù¸é, 
-            // ¹«°Å¿î °ö¼À ¿¬»êÀ» ÇÏÁö ¾Ê°í Áï½Ã ´ÙÀ½ Á»ºñ·Î ³Ñ¾î°©´Ï´Ù! (ÀüÃ¼ ¿¬»êÀÇ 99% ½ºÅµ)
-            if (diffX > SeparationRadius || diffX < -SeparationRadius ||
-                diffZ > SeparationRadius || diffZ < -SeparationRadius)
+            for (int cz = -1; cz <= 1; cz++)
             {
-                continue;
-            }
+                int hash = HashPositionsJob.GetGridHash(
+                    new float3(currentPos.x + cx * CellSize, 0, currentPos.z + cz * CellSize), CellSize);
 
-            // À§ °ü¹®À» Åë°úÇÑ 'ÁøÂ¥ ÄÚ¾Õ¿¡ ÀÖ´Â Á»ºñ'µé¸¸ °Å¸®¸¦ °è»êÇÕ´Ï´Ù.
-            float sqrDist = diffX * diffX + diffZ * diffZ;
-
-            if (sqrDist < sepRadiusSqr && sqrDist > 0.0001f)
-            {
-                float pushStrength = (sepRadiusSqr - sqrDist) / sepRadiusSqr;
-                separationForce.x += diffX * pushStrength;
-                separationForce.z += diffZ * pushStrength;
-            }
-        }
-
-        if (separationForce.sqrMagnitude > 4.0f)
-        {
-            separationForce = separationForce.normalized * 2.0f;
-        }
-
-        float currentSepWeight = shouldClump ? SeparationWeight * 0.2f : SeparationWeight;
-        Vector3 finalDir = desiredDir + (separationForce * currentSepWeight);
-
-        if (finalDir.sqrMagnitude > 0.001f)
-        {
-            finalDir.Normalize();
-
-            if (isSteep)
-            {
-                Vector3 flatNormal = new Vector3(hit.normal.x, 0, hit.normal.z).normalized;
-                float dot = Vector3.Dot(finalDir, flatNormal);
-
-                if (dot < 0)
+                if (SpatialGrid.TryGetFirstValue(hash, out int otherIdx, out NativeParallelMultiHashMapIterator<int> it))
                 {
-                    finalDir -= flatNormal * dot;
-                }
+                    int checkCount = 0;
 
-                if (shouldClump)
-                {
-                    // ¿ìÈ¸ µûÀ§ ÇÏÁö ¾Ê°í ÇÃ·¹ÀÌ¾î¸¦ ÇâÇØ °ãÄ¡¸é¼­ Á»ºñ Å¾ ½×±â!
-                    currentPos += finalDir.normalized * (Speed * 0.01f) * DeltaTime;
-                }
-                else
-                {
-                    // ÀÏ¹İÀûÀÎ Àå¾Ö¹°À» ¸¸³µÀ» ¶§´Â ºÎµå·´°Ô ¿ìÈ¸ (Tangent Flow)
-                    float randomBias = (index % 2 == 0) ? 1f : -1f;
-                    Vector3 tangent1 = new Vector3(flatNormal.z, 0, -flatNormal.x);
-                    Vector3 tangent2 = new Vector3(-flatNormal.z, 0, flatNormal.x);
-
-                    float d1 = Vector3.Dot(tangent1, desiredDir);
-                    float d2 = Vector3.Dot(tangent2, desiredDir);
-
-                    Vector3 bestTangent = (d1 > d2) ? tangent1 : tangent2;
-
-                    if (Mathf.Abs(d1 - d2) < 0.1f)
+                    do
                     {
-                        bestTangent = (randomBias > 0) ? tangent1 : tangent2;
-                    }
+                        if (otherIdx == index) continue;
 
-                    finalDir = (finalDir + bestTangent * 1.5f).normalized;
-                    currentPos += flatNormal * (Speed * 0.1f) * DeltaTime;
-                    currentPos += finalDir * (Speed * 0.7f) * DeltaTime;
+                        checkCount++;
+                        if (checkCount > 16) break;
+
+                        Vector3 otherPos = AllEnemyPositions[otherIdx];
+                        Vector3 diff = currentPos - otherPos;
+                        float sqrDistXZ = diff.x * diff.x + diff.z * diff.z;
+
+                        if (sqrDistXZ < sepRadiusSqr && math.abs(diff.y) < 1.5f && sqrDistXZ > 0.001f)
+                        {
+                            float pushStrength = (sepRadiusSqr - sqrDistXZ) / sepRadiusSqr;
+                            separation.x += diff.x * pushStrength;
+                            separation.z += diff.z * pushStrength;
+                        }
+
+                        if (sqrDistXZ < 0.8f)
+                        {
+                            if (otherPos.y > currentPos.y + 0.8f)
+                            {
+                                myCarriedWeight += 1.0f;
+                            }
+                            else if (otherPos.y < currentPos.y && otherPos.y > currentPos.y - 1.8f)
+                            {
+                                float otherHeadY = otherPos.y + 1.2f;
+                                if (otherHeadY > targetGroundY) targetGroundY = otherHeadY;
+                            }
+                        }
+                    } while (SpatialGrid.TryGetNextValue(out otherIdx, ref it));
                 }
             }
-            else
-            {
-                // ÆòÁö ¹× ¿À¸£¸·±æ ÀÚ¿¬½º·¯¿î µî¹İ
-                float slopeDot = finalDir.x * hit.normal.x + finalDir.y * hit.normal.y + finalDir.z * hit.normal.z;
-                Vector3 moveDir = new Vector3(
-                    finalDir.x - hit.normal.x * slopeDot,
-                    finalDir.y - hit.normal.y * slopeDot,
-                    finalDir.z - hit.normal.z * slopeDot
-                );
-
-                if (moveDir.sqrMagnitude > 0.001f)
-                {
-                    moveDir.Normalize();
-                    currentPos += moveDir * Speed * DeltaTime;
-                }
-                else
-                {
-                    currentPos += finalDir * Speed * DeltaTime;
-                }
-            }
-
-            if (desiredDir.sqrMagnitude > 0.001f)
-            {
-                Quaternion targetRotation = Quaternion.LookRotation(desiredDir);
-                transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRotation, RotationSpeed * DeltaTime);
-            }
-
-            AnimStates[index] = 1;
-        }
-        else
-        {
-            AnimStates[index] = 0;
         }
 
-        // [¼öÁ¤ 3] Ãß¶ô ½º³À ÃÖÀûÈ­: 1.5m ÅÚ·¹Æ÷Æ® »èÁ¦, ÁøÂ¥ Áß·Â Àû¿ë!
-        float currentYVelocity = YVelocities[index];
+        if (separation.sqrMagnitude > 4.0f) separation = separation.normalized * 2.0f;
 
-        if (hit.colliderEntityId != 0)
+        bool isCollapsing = myCarriedWeight >= MaxWeightTolerance;
+        bool isClimbingWall = false;
+        float currentYVel = YVelocities[index];
+        float currentSpeed = (toTarget.sqrMagnitude < 2.0f) ? 0f : Speed;
+
+        Vector3 xzVelocity = (desiredDir * currentSpeed) + (separation * SeparationWeight);
+
+        if (isCollapsing) targetGroundY = trueGroundY;
+
+        // ë²½ ë“±ë°˜ ë° ê´€í†µ ë°©ì§€
+        if (!isCollapsing && fwdHit.colliderEntityId != 0 && fwdHit.distance < 1.2f)
         {
-            if (!isSteep)
-            {
-                // Çã¿ëÄ¡¸¦ 1.5m -> 0.25m·Î È® ÁÙ¿´½À´Ï´Ù. ³»¸®¸·±æÀº ºÙ¾î¼­ °¡°í, Àıº®Àº Áï½Ã ¶³¾îÁı´Ï´Ù!
-                if (currentPos.y <= groundY + 0.25f && currentPos.y >= groundY - 1.5f)
-                {
-                    currentPos.y = groundY;
-                    currentYVelocity = 0f;
-                }
-                else
-                {
-                    // °øÁß Ã¼°ø Áß (ÁøÂ¥ Ãß¶ô!)
-                    currentYVelocity += Gravity * DeltaTime;
-                    currentPos.y += currentYVelocity * DeltaTime;
+            Vector3 wallNormal = fwdHit.normal;
 
-                    // ¶³¾îÁö´Ù°¡ Á¤È®È÷ ¹Ù´ÚÀ» ¶Õ´Â ¼ø°£¿¡¸¸ ¾ÈÀüÇÏ°Ô ½º³À ÂøÁö!
-                    if (currentPos.y <= groundY)
-                    {
-                        currentPos.y = groundY;
-                        currentYVelocity = 0f;
-                    }
+            float dotVelocity = Vector3.Dot(xzVelocity, wallNormal);
+            if (dotVelocity < 0) xzVelocity -= wallNormal * dotVelocity;
+
+            float pushThreshold = 0.6f;
+            if (fwdHit.distance < pushThreshold)
+            {
+                Vector3 pushOut = wallNormal * (pushThreshold - fwdHit.distance);
+                pushOut.y = 0;
+                currentPos += pushOut;
+            }
+
+            Vector3 slopeUpDir = Vector3.ProjectOnPlane(Vector3.up, wallNormal).normalized;
+            if (slopeUpDir.y > 0.1f)
+            {
+                isClimbingWall = true;
+                float steepness = slopeUpDir.y;
+                float climbSpeed = Speed * math.lerp(0.8f, 0.2f, steepness);
+
+                currentPos += slopeUpDir * climbSpeed * dt;
+                currentYVel = 0f;
+            }
+        }
+
+        // ğŸš¨ [í•µì‹¬ ìˆ˜ì •] ìˆ˜ì§ ì´ë™ (Yì¶•) ìŠ¤ë¬´ë”© ë¡œì§ ë„ì…
+        if (!isClimbingWall)
+        {
+            if (currentPos.y > targetGroundY + 0.1f) // 1. ê³µì¤‘ì— ë–  ìˆìŒ -> ì¶”ë½
+            {
+                float gravityMultiplier = isCollapsing ? 2.5f : 1.0f;
+                currentYVel -= Gravity * gravityMultiplier * dt;
+                currentPos.y += currentYVel * dt;
+
+                // ì¶”ë½í•˜ë‹¤ ë°”ë‹¥ì— ë‹¿ìŒ
+                if (currentPos.y < targetGroundY)
+                {
+                    currentPos.y = targetGroundY;
+                    currentYVel = 0f;
                 }
             }
-            else
+            else if (currentPos.y < targetGroundY - 0.1f) // 2. íƒ€ê²Ÿ(ë™ì¡±ì˜ ë¨¸ë¦¬)ì´ ë‚˜ë³´ë‹¤ ìœ„ì— ìˆìŒ -> ê¸°ì–´ì˜¤ë¥´ê¸°
             {
-                // º®¿¡ ºÙ¾úÀ» ¶§µµ ¹ß¹ØÀÌ 0.5m ÀÌ»ó ºñ¾îÀÖÀ¸¸é ¾âÂ©¾øÀÌ ÀÚÀ¯³«ÇÏ!
-                if (heightDiff < -0.5f)
-                {
-                    currentYVelocity += Gravity * DeltaTime;
-                    currentPos.y += currentYVelocity * DeltaTime;
-
-                    if (currentPos.y <= groundY)
-                    {
-                        currentPos.y = groundY;
-                        currentYVelocity = 0f;
-                    }
-                }
-                else
-                {
-                    currentYVelocity = 0f;
-                }
+                // ìˆœê°„ì´ë™(íŒí•‘) ëŒ€ì‹  ë¶€ë“œëŸ½ê²Œ ìœ„ë¡œ ëŒì–´ì˜¬ë¦¼ (Speedì˜ 80% ì†ë„ë¡œ ê¸°ì–´ì˜¤ë¦„)
+                currentPos.y += (Speed * 0.8f) * dt;
+                currentYVel = 0f;
+            }
+            else // 3. ë°”ë‹¥ì— ì™„ë²½íˆ ë°€ì°©
+            {
+                currentPos.y = targetGroundY;
+                currentYVel = 0f;
             }
         }
         else
         {
-            currentYVelocity += Gravity * DeltaTime;
-            currentPos.y += currentYVelocity * DeltaTime;
+            // ì ˆë²½ì„ íƒ€ê³  ìˆëŠ” ì™€ì¤‘ì—ë„ ë™ì¡±ë“¤ì´ ë°‘ì—ì„œ ìŒ“ì•„ ì˜¬ë ¤ì£¼ë©´ ë¶€ë“œëŸ½ê²Œ ìƒìŠ¹
+            if (targetGroundY != -999f && currentPos.y < targetGroundY - 0.1f)
+            {
+                currentPos.y += (Speed * 0.8f) * dt;
+            }
         }
 
-        YVelocities[index] = currentYVelocity;
+        currentPos.x += xzVelocity.x * dt;
+        currentPos.z += xzVelocity.z * dt;
+
+        if (desiredDir.sqrMagnitude > 0.001f)
+        {
+            Quaternion targetRot = Quaternion.LookRotation(desiredDir);
+            transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, RotationSpeed * dt);
+        }
+
+        AnimStates[index] = (currentSpeed < 0.2f && !isClimbingWall) ? 2 : 1;
+        YVelocities[index] = currentYVel;
         transform.position = currentPos;
     }
 }
