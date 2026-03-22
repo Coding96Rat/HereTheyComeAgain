@@ -7,7 +7,8 @@ using UnityEngine.Jobs;
 [BurstCompile]
 public struct EnemyMovementJob : IJobParallelForTransform
 {
-    [ReadOnly] public NativeArray<Vector3> TargetPositions;
+    [ReadOnly] public NativeArray<Vector3> ActiveTargetPositions;
+    [ReadOnly] public NativeArray<int> TargetIndices;
     [ReadOnly] public NativeArray<RaycastHit> RaycastHits;
     [ReadOnly] public NativeArray<Vector3> AllEnemyPositions;
     [ReadOnly] public NativeParallelMultiHashMap<int, int> SpatialGrid;
@@ -15,6 +16,7 @@ public struct EnemyMovementJob : IJobParallelForTransform
     public NativeArray<float> YVelocities;
     public NativeArray<int> AnimStates;
 
+    [ReadOnly] public float ElapsedTime;
     [ReadOnly] public float DeltaTime;
     [ReadOnly] public float Speed;
     [ReadOnly] public float RotationSpeed;
@@ -24,10 +26,22 @@ public struct EnemyMovementJob : IJobParallelForTransform
     [ReadOnly] public float CellSize;
     [ReadOnly] public float MaxWeightTolerance;
 
+    [ReadOnly] public NativeArray<Vector3> FlowField0;
+    [ReadOnly] public NativeArray<Vector3> FlowField1;
+    [ReadOnly] public NativeArray<Vector3> FlowField2;
+    [ReadOnly] public NativeArray<Vector3> FlowField3;
+    [ReadOnly] public int GridCols;
+    [ReadOnly] public int GridRows;
+    [ReadOnly] public float AiCellSize;
+    [ReadOnly] public Vector3 BottomLeft;
+
     public void Execute(int index, TransformAccess transform)
     {
         Vector3 currentPos = transform.position;
-        Vector3 targetPos = TargetPositions[index];
+        int tIdx = TargetIndices[index];
+
+        Vector3 targetPos = (tIdx >= 0 && tIdx < ActiveTargetPositions.Length) ? ActiveTargetPositions[tIdx] : currentPos;
+
         float dt = DeltaTime;
 
         RaycastHit downHit = RaycastHits[index * 2];
@@ -35,7 +49,51 @@ public struct EnemyMovementJob : IJobParallelForTransform
 
         Vector3 toTarget = targetPos - currentPos;
         toTarget.y = 0f;
-        Vector3 desiredDir = toTarget.sqrMagnitude > 0.001f ? toTarget.normalized : Vector3.forward;
+        float distSqr = toTarget.sqrMagnitude;
+
+        Vector3 desiredDir = Vector3.forward;
+
+        // 💡 [수정됨] 타겟과의 거리가 약 1.5m(2.25f) 이내일 때만 FFS를 무시하고 타겟에게 달려듭니다.
+        // 기존 25.0f(5m)에서 대폭 줄여, 먼 거리에서는 무조건 FFS 화살표를 따르도록 강제합니다.
+        if (distSqr < 2.25f && distSqr > 0.001f)
+        {
+            desiredDir = toTarget.normalized;
+        }
+        else
+        {
+            int x = (int)math.floor((currentPos.x - BottomLeft.x) / AiCellSize);
+            int z = (int)math.floor((currentPos.z - BottomLeft.z) / AiCellSize);
+
+            if (x >= 0 && x < GridCols && z >= 0 && z < GridRows)
+            {
+                int flatIdx = z * GridCols + x;
+                Vector3 flowDir = Vector3.zero;
+
+                if (tIdx == 0 && FlowField0.IsCreated) flowDir = FlowField0[flatIdx];
+                else if (tIdx == 1 && FlowField1.IsCreated) flowDir = FlowField1[flatIdx];
+                else if (tIdx == 2 && FlowField2.IsCreated) flowDir = FlowField2[flatIdx];
+                else if (tIdx == 3 && FlowField3.IsCreated) flowDir = FlowField3[flatIdx];
+
+                // 💡 [수정됨] 내부적인 각도 계산(Blending)을 모두 제거하고, 
+                // 오직 FlowFieldJobs가 만들어준 완벽한 화살표(flowDir)에 100% 복종합니다.
+                if (flowDir.sqrMagnitude > 0.01f) desiredDir = flowDir;
+                else desiredDir = distSqr > 0.001f ? toTarget.normalized : Vector3.forward;
+            }
+            else
+            {
+                desiredDir = distSqr > 0.001f ? toTarget.normalized : Vector3.forward;
+            }
+        }
+
+        // 💡 [수정됨] 군집 퍼트리기 (Swarm Sway) 강도 대폭 축소
+        // 곱하는 값을 0.5f에서 0.1f로 줄여서, 화살표 궤도를 이탈하지 않는 선에서만 살짝 꿈틀거리게 만듭니다.
+        if (desiredDir.sqrMagnitude > 0.001f && distSqr > 10.0f)
+        {
+            Vector3 rightVector = new Vector3(desiredDir.z, 0, -desiredDir.x);
+            float sway = math.sin(ElapsedTime * 2.0f + index * 7.13f) * 0.1f;
+            desiredDir += rightVector * sway;
+            desiredDir = (Vector3)math.normalize(desiredDir);
+        }
 
         float trueGroundY = downHit.colliderEntityId != 0 ? downHit.point.y : -999f;
         float targetGroundY = trueGroundY;
@@ -54,7 +112,6 @@ public struct EnemyMovementJob : IJobParallelForTransform
                 if (SpatialGrid.TryGetFirstValue(hash, out int otherIdx, out NativeParallelMultiHashMapIterator<int> it))
                 {
                     int checkCount = 0;
-
                     do
                     {
                         if (otherIdx == index) continue;
@@ -75,10 +132,7 @@ public struct EnemyMovementJob : IJobParallelForTransform
 
                         if (sqrDistXZ < 0.8f)
                         {
-                            if (otherPos.y > currentPos.y + 0.8f)
-                            {
-                                myCarriedWeight += 1.0f;
-                            }
+                            if (otherPos.y > currentPos.y + 0.8f) myCarriedWeight += 1.0f;
                             else if (otherPos.y < currentPos.y && otherPos.y > currentPos.y - 1.8f)
                             {
                                 float otherHeadY = otherPos.y + 1.2f;
@@ -93,65 +147,55 @@ public struct EnemyMovementJob : IJobParallelForTransform
         if (separation.sqrMagnitude > 4.0f) separation = separation.normalized * 2.0f;
 
         bool isCollapsing = myCarriedWeight >= MaxWeightTolerance;
-        bool isClimbingWall = false;
         float currentYVel = YVelocities[index];
-        float currentSpeed = (toTarget.sqrMagnitude < 2.0f) ? 0f : Speed;
+        float currentSpeed = (distSqr < 2.0f) ? 0f : Speed;
 
         Vector3 xzVelocity = (desiredDir * currentSpeed) + (separation * SeparationWeight);
-
         if (isCollapsing) targetGroundY = trueGroundY;
 
-        // 벽 등반 및 관통 방지
         if (!isCollapsing && fwdHit.colliderEntityId != 0 && fwdHit.distance < 1.2f)
         {
-            Vector3 wallNormal = fwdHit.normal;
-
-            float dotVelocity = Vector3.Dot(xzVelocity, wallNormal);
-            if (dotVelocity < 0) xzVelocity -= wallNormal * dotVelocity;
-
-            float pushThreshold = 0.6f;
-            if (fwdHit.distance < pushThreshold)
+            if (fwdHit.normal.y < 0.6f)
             {
-                Vector3 pushOut = wallNormal * (pushThreshold - fwdHit.distance);
-                pushOut.y = 0;
-                currentPos += pushOut;
-            }
+                float dotVelocity = Vector3.Dot(xzVelocity, fwdHit.normal);
+                if (dotVelocity < 0) xzVelocity -= fwdHit.normal * dotVelocity;
 
-            Vector3 slopeUpDir = Vector3.ProjectOnPlane(Vector3.up, wallNormal).normalized;
-            if (slopeUpDir.y > 0.1f)
-            {
-                isClimbingWall = true;
-                float steepness = slopeUpDir.y;
-                float climbSpeed = Speed * math.lerp(0.8f, 0.2f, steepness);
-
-                currentPos += slopeUpDir * climbSpeed * dt;
-                currentYVel = 0f;
+                float pushThreshold = 0.6f;
+                if (fwdHit.distance < pushThreshold)
+                {
+                    Vector3 pushOut = fwdHit.normal * (pushThreshold - fwdHit.distance);
+                    pushOut.y = 0;
+                    currentPos += pushOut;
+                }
             }
         }
 
-        // 🚨 [핵심 수정] 수직 이동 (Y축) 스무딩 로직 도입
-        if (!isClimbingWall)
+        if (targetGroundY != -999f)
         {
-            if (currentPos.y > targetGroundY + 0.1f) // 1. 공중에 떠 있음 -> 추락
-            {
-                float gravityMultiplier = isCollapsing ? 2.5f : 1.0f;
-                currentYVel -= Gravity * gravityMultiplier * dt;
-                currentPos.y += currentYVel * dt;
+            float yDiff = targetGroundY - currentPos.y;
 
-                // 추락하다 바닥에 닿음
-                if (currentPos.y < targetGroundY)
+            if (yDiff > 0.1f) // 오르막
+            {
+                currentPos.y += math.min(yDiff, Speed * 1.5f * dt);
+                currentYVel = 0f;
+            }
+            else if (yDiff < -0.1f) // 내리막 또는 추락
+            {
+                currentYVel -= Gravity * (isCollapsing ? 2.5f : 1.0f) * dt;
+                float nextY = currentPos.y + currentYVel * dt;
+
+                // 💡 [추락 방지 핵심]: 다음 프레임 위치가 지형보다 낮아지면 강제로 지형 높이에 고정
+                if (nextY < targetGroundY)
                 {
                     currentPos.y = targetGroundY;
                     currentYVel = 0f;
                 }
+                else
+                {
+                    currentPos.y = nextY;
+                }
             }
-            else if (currentPos.y < targetGroundY - 0.1f) // 2. 타겟(동족의 머리)이 나보다 위에 있음 -> 기어오르기
-            {
-                // 순간이동(팝핑) 대신 부드럽게 위로 끌어올림 (Speed의 80% 속도로 기어오름)
-                currentPos.y += (Speed * 0.8f) * dt;
-                currentYVel = 0f;
-            }
-            else // 3. 바닥에 완벽히 밀착
+            else // 평지
             {
                 currentPos.y = targetGroundY;
                 currentYVel = 0f;
@@ -159,11 +203,15 @@ public struct EnemyMovementJob : IJobParallelForTransform
         }
         else
         {
-            // 절벽을 타고 있는 와중에도 동족들이 밑에서 쌓아 올려주면 부드럽게 상승
-            if (targetGroundY != -999f && currentPos.y < targetGroundY - 0.1f)
-            {
-                currentPos.y += (Speed * 0.8f) * dt;
-            }
+            // 💡 [세이프티]: 레이캐스트가 바닥을 못 찾았을 때(타일 경계 등) 
+            // 갑자기 추락하지 않고 이전 프레임 높이를 유지하며 재탐색 유도
+            currentYVel = 0f;
+        }
+
+        // 💡 [최종 방어선]: 만약 어떤 이유로든 현재 Y가 targetGroundY보다 낮아지면 즉시 복구
+        if (targetGroundY != -999f && currentPos.y < targetGroundY)
+        {
+            currentPos.y = targetGroundY;
         }
 
         currentPos.x += xzVelocity.x * dt;
@@ -175,7 +223,7 @@ public struct EnemyMovementJob : IJobParallelForTransform
             transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, RotationSpeed * dt);
         }
 
-        AnimStates[index] = (currentSpeed < 0.2f && !isClimbingWall) ? 2 : 1;
+        AnimStates[index] = (currentSpeed < 0.2f) ? 2 : 1;
         YVelocities[index] = currentYVel;
         transform.position = currentPos;
     }

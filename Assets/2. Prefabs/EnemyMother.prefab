@@ -54,13 +54,14 @@ MonoBehaviour:
   spawnInterval: 1
   enemiesPerSpawn: 1000
   maxActiveEnemies: 1000
-  spawnRadius: 93.4
+  spawnRadius: 46.1
   Enemies: []
   separationRadius: 1.5
   separationWeight: 2
   globalEnemySpeed: 15
-  globalRotationSpeed: 360
-  maxSlopeAngle: 45
+  globalRotationSpeed: 720
+  cellSize: 2
+  maxWeightTolerance: 3
   injectedStairs: []
 --- !u!114 &2493228017869009197
 MonoBehaviour:
@@ -92,7 +93,7 @@ MonoBehaviour:
   _initializeOrder: 0
   _preventDespawnOnDisconnect: 0
   _defaultDespawnType: 1
-  _initializedTimestamp: -8584276964284562288
+  _initializedTimestamp: -8584274292091922563
   NetworkObserver: {fileID: 0}
   _enablePrediction: 0
   _predictionType: 0

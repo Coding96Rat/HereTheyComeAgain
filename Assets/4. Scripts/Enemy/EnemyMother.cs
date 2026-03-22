@@ -1,70 +1,59 @@
-using FishNet.Object;
+ï»¿using FishNet.Object;
 using System.Collections;
 using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Jobs;
-using Unity.Mathematics; // [Ãß°¡] °ø°£ ÇØ½Ì ¿¬»êÀ» À§ÇÔ
+using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Jobs;
 
 public class EnemyMother : NetworkBehaviour
 {
     public NetworkObject enemyPrefab;
-
-    // ÇÃ·¹ÀÌ¾î¿Í ¹æÈ­º®À» ¸ğµÎ ´ã´Â ÅëÇÕ Å¸°Ù ¸®½ºÆ®
     public static List<Transform> ValidTargets = new List<Transform>();
 
-    [Header("¿ì¼± Å¸°ÙÆÃ (ÀÚµ¿ ÇÒ´çµÊ)")]
-    [Tooltip("ÀÌ ¸¶´õ°¡ ¹«Á¶°Ç ÃÖ¿ì¼±À¸·Î ºÎ¼ú Å¸°Ù (¹æÈ­º® µî)")]
     public Transform dedicatedTarget;
 
-    [Header("°¢ ¿şÀÌºê ¼÷ÁÖ ½ºÆù ¼³Á¤")]
+    [Header("ìŠ¤í° ì„¤ì •")]
     public float startDelay = 5f;
     public float spawnInterval = 1f;
     public int enemiesPerSpawn = 5;
-    public int maxActiveEnemies = 4000; // 4000¸¶¸® ·»´õ¸µ È¯°æ
+    public int maxActiveEnemies = 4000;
     public float spawnRadius = 20f;
 
     public List<Enemy> Enemies;
 
-    // --- Job System °ü·Ã º¯¼öµé ---
     private TransformAccessArray _transformAccessArray;
-    private NativeArray<Vector3> _targetPositions;
     private NativeArray<Vector3> _currentPositions;
     private JobHandle _movementJobHandle;
 
     private NativeArray<RaycastCommand> _raycastCommands;
     private NativeArray<RaycastHit> _raycastHits;
     private NativeArray<float> _yVelocities;
-
     private NativeArray<int> _animStates;
     private QueryParameters _groundQueryParams;
 
-    // [ÇÙ½É] °ø°£ ÇØ½Ì ¸Ê (O(1) ÁÖº¯ Å½»ö)
+    private NativeArray<int> _targetIndices;
+    private NativeArray<Vector3> _activeTargetPositions; // ğŸ’¡ íƒ€ê²Ÿ ìœ„ì¹˜ë¥¼ ë‹´ì•„ Jobìœ¼ë¡œ í•œ ë²ˆì— ì˜ëŠ” ë°°ì—´
+
+    private FlowFieldSystem _ffs;
     private NativeParallelMultiHashMap<int, int> _spatialGrid;
 
-    [Header("±ºÁı (Separation) ¹× ¹°¸® ¼³Á¤")]
+    [Header("ë¬¼ë¦¬ ì„¤ì •")]
     public float separationRadius = 1.5f;
     public float separationWeight = 2.0f;
     public float globalEnemySpeed = 3f;
     public float globalRotationSpeed = 360f;
-
-    [Tooltip("°ø°£ ÇØ½Ì ±×¸®µå ¼¿ Å©±â (³Ê¹« Å©¸é ¿¬»ê·® Áõ°¡, ³Ê¹« ÀÛÀ¸¸é ±ºÁı ºĞ¸®µÊ)")]
     public float cellSize = 2.0f;
-
-    [Tooltip("¸Ó¸® À§¿¡ ¸î ¸¶¸®°¡ ¿Ã¶óÅ¸¸é ¹Ù´ÚÀ¸·Î ¹«³ÊÁúÁö °áÁ¤ÇÏ´Â ÇÏÁßÄ¡")]
     public float maxWeightTolerance = 3.0f;
 
-    // ½ºÆ÷³Ê·ÎºÎÅÍ À§Ä¡ µ¥ÀÌÅÍ¸¸ ³Ñ°Ü¹ŞÀ» ¹è¿­ (ÀÎ½ºÆåÅÍ ³ëÃâ ¾È ÇÔ)
     [HideInInspector]
     public Vector3[] injectedStairs;
 
-    // ½¦ÀÌ´õ Á¦¾î¿ë Åë½Å ºí·Ï
     private MaterialPropertyBlock _mpb;
     private readonly int _isWalkingHash = Shader.PropertyToID("_IsWalking");
     private readonly int _timeOffsetHash = Shader.PropertyToID("_TimeOffset");
 
-    #region Å¸°Ù °ü¸® ½Ã½ºÅÛ (Target Management)
     public static void RegisterTarget(Transform target)
     {
         if (!ValidTargets.Contains(target)) ValidTargets.Add(target);
@@ -75,16 +64,13 @@ public class EnemyMother : NetworkBehaviour
         if (ValidTargets.Contains(target)) ValidTargets.Remove(target);
     }
 
-    // Æ¯Á¤ À§Ä¡¿¡¼­ °¡Àå °¡±î¿î »ì¾ÆÀÖ´Â Å¸°ÙÀ» Ã£¾ÆÁÖ´Â ÇÔ¼ö
     public static Transform GetClosestTarget(Vector3 searchPos)
     {
         Transform closest = null;
         float minDist = float.MaxValue;
-
         for (int i = 0; i < ValidTargets.Count; i++)
         {
             if (ValidTargets[i] == null || !ValidTargets[i].gameObject.activeInHierarchy) continue;
-
             float dist = (ValidTargets[i].position - searchPos).sqrMagnitude;
             if (dist < minDist)
             {
@@ -94,9 +80,7 @@ public class EnemyMother : NetworkBehaviour
         }
         return closest;
     }
-    #endregion
 
-    #region O(1) ¸®½ºÆ® °ü¸® ½Ã½ºÅÛ (Job System ¿¬µ¿)
     public void AddEnemy(Enemy enemy)
     {
         int newIndex = Enemies.Count;
@@ -104,7 +88,9 @@ public class EnemyMother : NetworkBehaviour
         enemy.motherListIndex = newIndex;
 
         _transformAccessArray.Add(enemy.transform);
-        _targetPositions[newIndex] = enemy.GetTargetPosition();
+        _targetIndices[newIndex] = enemy.GetTargetIndex(); // ğŸ’¡ ìŠ¤í° ì‹œ ì¸ë±ìŠ¤ë§Œ ìºì‹±
+        _yVelocities[newIndex] = 0f;
+        _animStates[newIndex] = 0;
 
         if (enemy.myRenderer != null)
         {
@@ -118,7 +104,6 @@ public class EnemyMother : NetworkBehaviour
     public void RemoveEnemy(Enemy enemy)
     {
         if (!_transformAccessArray.isCreated) return;
-
         _movementJobHandle.Complete();
 
         int removeIndex = enemy.motherListIndex;
@@ -139,29 +124,28 @@ public class EnemyMother : NetworkBehaviour
             Enemies.RemoveAt(lastIndex);
 
             _transformAccessArray.RemoveAtSwapBack(removeIndex);
-            _targetPositions[removeIndex] = _targetPositions[lastIndex];
-        }
 
+            // ğŸ’¡ [ì¹˜ëª…ì  ë²„ê·¸ ìˆ˜ì •] ëª¨ë“  ë°ì´í„° ë°°ì—´ì„ ë‹¹ê²¨ì™€ì•¼ ë°°ì—´ ì˜¤ì—¼ì´ ì•ˆ ìƒê¹ë‹ˆë‹¤.
+            _targetIndices[removeIndex] = _targetIndices[lastIndex];
+            _yVelocities[removeIndex] = _yVelocities[lastIndex];
+            _animStates[removeIndex] = _animStates[lastIndex];
+            _currentPositions[removeIndex] = _currentPositions[lastIndex];
+        }
         enemy.motherListIndex = -1;
     }
-    #endregion
 
     private void Awake()
     {
         Enemies = new List<Enemy>(maxActiveEnemies);
         _transformAccessArray = new TransformAccessArray(maxActiveEnemies);
-        _targetPositions = new NativeArray<Vector3>(maxActiveEnemies, Allocator.Persistent);
-
-        // ÇÏ´Ü°ú Àü¹æ, 2°³ÀÇ ·¹ÀÌÄ³½ºÆ®¸¦ ½î±â À§ÇØ ¹è¿­ Å©±â¸¦ 2¹è·Î ´Ã¸²
         _raycastCommands = new NativeArray<RaycastCommand>(maxActiveEnemies * 2, Allocator.Persistent);
         _raycastHits = new NativeArray<RaycastHit>(maxActiveEnemies * 2, Allocator.Persistent);
-
         _yVelocities = new NativeArray<float>(maxActiveEnemies, Allocator.Persistent);
         _currentPositions = new NativeArray<Vector3>(maxActiveEnemies, Allocator.Persistent);
         _animStates = new NativeArray<int>(maxActiveEnemies, Allocator.Persistent);
-
-        // [ÇÙ½É] NativeParallelMultiHashMap ÇÒ´ç
         _spatialGrid = new NativeParallelMultiHashMap<int, int>(maxActiveEnemies, Allocator.Persistent);
+        _targetIndices = new NativeArray<int>(maxActiveEnemies, Allocator.Persistent);
+        _activeTargetPositions = new NativeArray<Vector3>(4, Allocator.Persistent); // ìµœëŒ€ 4ì¸ íƒ€ê²Ÿìš©
 
         _groundQueryParams = new QueryParameters(LayerMask.GetMask("Ground"), false, QueryTriggerInteraction.Ignore, false);
         _mpb = new MaterialPropertyBlock();
@@ -171,19 +155,29 @@ public class EnemyMother : NetworkBehaviour
     {
         _movementJobHandle.Complete();
         if (_transformAccessArray.isCreated) _transformAccessArray.Dispose();
-        if (_targetPositions.IsCreated) _targetPositions.Dispose();
         if (_raycastCommands.IsCreated) _raycastCommands.Dispose();
         if (_raycastHits.IsCreated) _raycastHits.Dispose();
         if (_yVelocities.IsCreated) _yVelocities.Dispose();
         if (_currentPositions.IsCreated) _currentPositions.Dispose();
         if (_animStates.IsCreated) _animStates.Dispose();
-
-        if (_spatialGrid.IsCreated) _spatialGrid.Dispose(); // ÇØ½Ã¸Ê ÆÄ±â
+        if (_targetIndices.IsCreated) _targetIndices.Dispose();
+        if (_activeTargetPositions.IsCreated) _activeTargetPositions.Dispose();
+        if (_spatialGrid.IsCreated) _spatialGrid.Dispose();
     }
 
     public override void OnStartServer()
     {
         base.OnStartServer();
+        _ffs = FindFirstObjectByType<FlowFieldSystem>();
+
+        // ğŸ’¡ [ì—¬ê¸°ê°€ ë¹ ì ¸ìˆì—ˆìŠµë‹ˆë‹¤!] FFS ì—”ì§„ ì‹œë™ ì¼œê¸°
+        if (_ffs != null)
+        {
+            _ffs.Initialize(4); // FFS ë„í™”ì§€ ì„¸íŒ… ë° êµ½ê¸°
+            _ffs.StartUpdatingFlowFields(ValidTargets); // í”Œë ˆì´ì–´ ëª©ë¡ ì—°ê²°
+            Debug.Log("[EnemyMother] FFS ì—”ì§„ ì‹œë™ ì™„ë£Œ!");
+        }
+
         base.NetworkManager.ObjectPool.CacheObjects(enemyPrefab, maxActiveEnemies, true);
         StartCoroutine(SpawnWaveRoutine());
     }
@@ -198,19 +192,20 @@ public class EnemyMother : NetworkBehaviour
     {
         if (Enemies.Count == 0) return;
 
-        for (int i = 0; i < Enemies.Count; i++)
+        // ğŸ’¡ [ì´ˆê³ ì† ìµœì í™”] 4000ë²ˆ ë°˜ë³µí•˜ë˜ ë£¨í”„ ì‚­ì œ. í˜„ì¬ ìœ íš¨í•œ íƒ€ê²Ÿ(í”Œë ˆì´ì–´ 1~4ëª…) ì¢Œí‘œë§Œ ì—…ë°ì´íŠ¸.
+        for (int i = 0; i < ValidTargets.Count && i < 4; i++)
         {
-            _targetPositions[i] = Enemies[i].GetTargetPosition();
+            if (ValidTargets[i] != null && ValidTargets[i].gameObject.activeInHierarchy)
+            {
+                _activeTargetPositions[i] = ValidTargets[i].position;
+            }
         }
 
-        // ¸Å ÇÁ·¹ÀÓ ÇØ½Ã¸Ê ÃÊ±âÈ­
         _spatialGrid.Clear();
 
-        // 1. À§Ä¡ º¹»ç Job
         CopyPositionsJob copyJob = new CopyPositionsJob { CurrentPositions = _currentPositions };
         JobHandle copyHandle = copyJob.Schedule(_transformAccessArray);
 
-        // 2. °ø°£ ÇØ½Ì Job
         HashPositionsJob hashJob = new HashPositionsJob
         {
             Positions = _currentPositions,
@@ -219,7 +214,6 @@ public class EnemyMother : NetworkBehaviour
         };
         JobHandle hashHandle = hashJob.Schedule(Enemies.Count, 64, copyHandle);
 
-        // 3. ·¹ÀÌÄ³½ºÆ® ¼Â¾÷ ¹× ½ÇÇà Job
         RaycastSetupJob setupJob = new RaycastSetupJob
         {
             Commands = _raycastCommands,
@@ -228,13 +222,25 @@ public class EnemyMother : NetworkBehaviour
         JobHandle setupHandle = setupJob.Schedule(_transformAccessArray, copyHandle);
         JobHandle raycastHandle = RaycastCommand.ScheduleBatch(_raycastCommands, _raycastHits, 32, setupHandle);
 
-        // 4. Hash ¿¬»ê°ú Raycast ¿¬»êÀÌ ¸ğµÎ ³¡³¯ ¶§±îÁö ´ë±â
         JobHandle combinedHandle = JobHandle.CombineDependencies(hashHandle, raycastHandle);
 
-        // 5. ¸ŞÀÎ ¹°¸® ¿¬»ê Job
+        NativeArray<Vector3> ff0 = default;
+        NativeArray<Vector3> ff1 = default;
+        NativeArray<Vector3> ff2 = default;
+        NativeArray<Vector3> ff3 = default;
+
+        if (_ffs != null && _ffs.NativeFlowFields != null)
+        {
+            if (_ffs.NativeFlowFields.Length > 0) ff0 = _ffs.NativeFlowFields[0];
+            if (_ffs.NativeFlowFields.Length > 1) ff1 = _ffs.NativeFlowFields[1];
+            if (_ffs.NativeFlowFields.Length > 2) ff2 = _ffs.NativeFlowFields[2];
+            if (_ffs.NativeFlowFields.Length > 3) ff3 = _ffs.NativeFlowFields[3];
+        }
+
         EnemyMovementJob moveJob = new EnemyMovementJob
         {
-            TargetPositions = _targetPositions,
+            ActiveTargetPositions = _activeTargetPositions, // ğŸ’¡ ë¬´ê±°ìš´ ë°°ì—´ ëŒ€ì‹  ê°€ë²¼ìš´ ë°°ì—´ 1ê°œ ì „ë‹¬
+            TargetIndices = _targetIndices,
             RaycastHits = _raycastHits,
             AllEnemyPositions = _currentPositions,
             SpatialGrid = _spatialGrid,
@@ -247,7 +253,16 @@ public class EnemyMother : NetworkBehaviour
             SeparationRadius = separationRadius,
             SeparationWeight = separationWeight,
             CellSize = cellSize,
-            MaxWeightTolerance = maxWeightTolerance
+            MaxWeightTolerance = maxWeightTolerance,
+
+            FlowField0 = ff0,
+            FlowField1 = ff1,
+            FlowField2 = ff2,
+            FlowField3 = ff3,
+            GridCols = _ffs != null ? _ffs.GridCols : 0,
+            GridRows = _ffs != null ? _ffs.GridRows : 0,
+            AiCellSize = _ffs != null ? _ffs.aiCellSize : 2f,
+            BottomLeft = _ffs != null ? _ffs.BottomLeft : Vector3.zero
         };
 
         _movementJobHandle = moveJob.Schedule(_transformAccessArray, combinedHandle);
@@ -256,7 +271,6 @@ public class EnemyMother : NetworkBehaviour
     private void LateUpdate()
     {
         if (Enemies.Count == 0) return;
-
         _movementJobHandle.Complete();
 
         if (IsClientInitialized)
@@ -272,18 +286,9 @@ public class EnemyMother : NetworkBehaviour
                 {
                     enemy.lastAnimState = currentState;
 
-                    if (currentState == 2)
-                    {
-                        _mpb.SetFloat(_isWalkingHash, 0f);
-                    }
-                    else if (currentState == 1)
-                    {
-                        _mpb.SetFloat(_isWalkingHash, 1f);
-                    }
-                    else
-                    {
-                        _mpb.SetFloat(_isWalkingHash, 0f);
-                    }
+                    if (currentState == 2) _mpb.SetFloat(_isWalkingHash, 0f);
+                    else if (currentState == 1) _mpb.SetFloat(_isWalkingHash, 1f);
+                    else _mpb.SetFloat(_isWalkingHash, 0f);
 
                     enemy.myRenderer.SetPropertyBlock(_mpb);
                 }
@@ -309,17 +314,7 @@ public class EnemyMother : NetworkBehaviour
 
             if (pooledEnemy.TryGetComponent(out Enemy simpleEnemy))
             {
-                Transform target = null;
-
-                if (dedicatedTarget != null && dedicatedTarget.gameObject.activeInHierarchy)
-                {
-                    target = dedicatedTarget;
-                }
-                else
-                {
-                    target = GetClosestTarget(transform.position);
-                }
-
+                Transform target = dedicatedTarget != null && dedicatedTarget.gameObject.activeInHierarchy ? dedicatedTarget : GetClosestTarget(transform.position);
                 simpleEnemy.InitializeEnemy(this, target);
             }
 

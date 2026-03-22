@@ -1,6 +1,11 @@
-using UnityEngine;
+Ôªøusing UnityEngine;
 using FishNet.Object;
 using FishNet.Component.Spawning;
+using System.Collections.Generic;
+
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
 public class SpawnTransformHandler : NetworkBehaviour
 {
@@ -9,43 +14,48 @@ public class SpawnTransformHandler : NetworkBehaviour
     public PlayerSpawner playerSpawner;
     public GameObject enemyMotherPrefab;
 
-    [Header("Frontline Spawn Settings")]
-    public float playerSpacing = 20f;
-    public float playerBaselineZ = 10f;
+    [Header("Player Cross Settings")]
+    public float playerOffsetFromCenter = 15f;
+    public float playerSpawnHeight = 10f;
 
-    [Header("Dedicated Targets (πÊ»≠∫Æ)")]
+    [Header("Mother Donut Spawn Settings")]
+    public float motherMinRadius = 30f;
+    public float motherMaxRadius = 50f;
+    [Range(0f, 45f)]
+    public float motherSpawnAngleVariance = 15f;
+
+    [Header("Dedicated Targets (Î∞©ÌôîÎ≤Ω)")]
     public Transform[] playerFirewalls = new Transform[4];
 
-    // [ªı∑Œ √ﬂ∞°] æ¿ø° ¿÷¥¬ ∞Ë¥‹ ¿‘±∏µÈ¿ª ø©±‚ø° ≤¯æÓ¥Ÿ ≥÷Ω¿¥œ¥Ÿ!
     [Header("Environment (Stairs)")]
-    [Tooltip("¡ˆ«¸¿« ∞Ë¥‹ ¿‘±∏(∫Û ø¿∫Í¡ß∆Æ)∏¶ ≥÷æÓ¡÷ººø‰.")]
     public Transform[] stairEntrances;
 
+    [Header("‚òÖ Pre-calculated Spawns")]
+    public Transform[] generatedMotherSpawns = new Transform[4];
+
     private Vector3[] _playerSpawns = new Vector3[4];
-    private Vector3[] _motherSpawns = new Vector3[4];
+    private readonly Vector3[] _baseDirections = { Vector3.forward, Vector3.back, Vector3.right, Vector3.left };
 
     private void Awake()
     {
         if (gridSystem == null) gridSystem = FindFirstObjectByType<GridSystem>();
         if (playerSpawner == null) playerSpawner = GetComponent<PlayerSpawner>();
 
-        CalculateSpawnPositions();
+        CalculatePlayerSpawns();
         ApplyPlayerSpawnsToFishNet();
     }
 
-    private void CalculateSpawnPositions()
+    private void CalculatePlayerSpawns()
     {
         if (gridSystem == null) return;
         Vector3 mid = gridSystem.MiddlePoint;
-        float edgeZ = (gridSystem.Rows * gridSystem.CellSize) / 2f;
-        float startX = mid.x - (playerSpacing * 1.5f);
 
-        for (int i = 0; i < 4; i++)
-        {
-            float posX = startX + (i * playerSpacing);
-            _playerSpawns[i] = new Vector3(posX, 10, mid.z + playerBaselineZ);
-            _motherSpawns[i] = new Vector3(posX, 0, mid.z + edgeZ);
-        }
+        _playerSpawns[0] = mid + _baseDirections[0] * playerOffsetFromCenter;
+        _playerSpawns[1] = mid + _baseDirections[1] * playerOffsetFromCenter;
+        _playerSpawns[2] = mid + _baseDirections[2] * playerOffsetFromCenter;
+        _playerSpawns[3] = mid + _baseDirections[3] * playerOffsetFromCenter;
+
+        for (int i = 0; i < 4; i++) _playerSpawns[i].y = playerSpawnHeight;
     }
 
     private void ApplyPlayerSpawnsToFishNet()
@@ -66,19 +76,52 @@ public class SpawnTransformHandler : NetworkBehaviour
     {
         base.OnStartServer();
 
+        // 1. FlowFieldSystem ÏÑ∏ÌåÖ
+        FlowFieldSystem ffs = FindFirstObjectByType<FlowFieldSystem>();
+        if (ffs != null)
+        {
+            ffs.Initialize(4);
+
+            EnemyMother.ValidTargets.Clear();
+            List<Transform> flowTargets = new List<Transform>();
+
+            for (int i = 0; i < playerFirewalls.Length; i++)
+            {
+                if (playerFirewalls[i] != null)
+                {
+                    flowTargets.Add(playerFirewalls[i]);
+                    EnemyMother.ValidTargets.Add(playerFirewalls[i]); // ÎßàÎçî Í≥µÌÜµ ÌÉÄÍ≤üÏóê Îì±Î°ù!
+                }
+            }
+            ffs.StartUpdatingFlowFields(flowTargets);
+        }
+
+        Vector3 mid = gridSystem != null ? gridSystem.MiddlePoint : Vector3.zero;
+
+        // 2. Mother Ïä§Ìè∞
         for (int i = 0; i < 4; i++)
         {
-            GameObject mother = Instantiate(enemyMotherPrefab, _motherSpawns[i], Quaternion.identity);
+            Vector3 finalMotherPos;
+
+            if (generatedMotherSpawns.Length > i && generatedMotherSpawns[i] != null)
+            {
+                finalMotherPos = generatedMotherSpawns[i].position;
+            }
+            else
+            {
+                float randomAngle = Random.Range(-motherSpawnAngleVariance, motherSpawnAngleVariance);
+                Vector3 randomDir = Quaternion.Euler(0, randomAngle, 0) * _baseDirections[i];
+                float randomDist = Random.Range(motherMinRadius, motherMaxRadius);
+                finalMotherPos = mid + (randomDir * randomDist);
+            }
+
+            GameObject mother = Instantiate(enemyMotherPrefab, finalMotherPos, Quaternion.identity);
 
             if (mother.TryGetComponent(out EnemyMother motherScript))
             {
-                // 1. πÊ»≠∫Æ ≈∏∞Ÿ ¡÷¿‘
                 if (i < playerFirewalls.Length && playerFirewalls[i] != null)
-                {
                     motherScript.dedicatedTarget = playerFirewalls[i];
-                }
 
-                // 2. [«ŸΩ…] æ¿ø° ¿÷¥¬ ∞Ë¥‹¿« "∞Ì¡§µ» ¿ßƒ°(Vector3)"∏∏ ªÃæ∆º≠ ∏∂¥ıø°∞‘ ¡÷¿‘!
                 if (stairEntrances != null && stairEntrances.Length > 0)
                 {
                     motherScript.injectedStairs = new Vector3[stairEntrances.Length];
@@ -98,18 +141,89 @@ public class SpawnTransformHandler : NetworkBehaviour
         if (gridSystem == null) gridSystem = FindFirstObjectByType<GridSystem>();
         if (gridSystem == null) return;
 
-        CalculateSpawnPositions();
+        CalculatePlayerSpawns();
+        Vector3 mid = gridSystem.MiddlePoint;
+
+        Gizmos.color = Color.cyan;
+        for (int i = 0; i < 4; i++) Gizmos.DrawSphere(_playerSpawns[i], 1f);
+
+        for (int i = 0; i < 4; i++) DrawGizmoArc(mid, _baseDirections[i], motherMinRadius, motherMaxRadius, motherSpawnAngleVariance);
+
+        Gizmos.color = Color.magenta;
+        for (int i = 0; i < generatedMotherSpawns.Length; i++)
+        {
+            if (generatedMotherSpawns[i] != null)
+            {
+                Gizmos.DrawWireCube(generatedMotherSpawns[i].position + Vector3.up, new Vector3(4, 4, 4));
+                Gizmos.DrawLine(mid, generatedMotherSpawns[i].position);
+            }
+        }
+    }
+
+    private void DrawGizmoArc(Vector3 center, Vector3 baseDir, float minRadius, float maxRadius, float angleVariance)
+    {
+        Vector3 leftDir = Quaternion.Euler(0, -angleVariance, 0) * baseDir;
+        Vector3 rightDir = Quaternion.Euler(0, angleVariance, 0) * baseDir;
+
+        Gizmos.color = Color.yellow;
+        Gizmos.DrawLine(center + leftDir * minRadius, center + rightDir * minRadius);
+        Gizmos.color = Color.red;
+        Gizmos.DrawLine(center + leftDir * maxRadius, center + rightDir * maxRadius);
+        Gizmos.color = new Color(1f, 0.5f, 0f, 0.5f);
+        Gizmos.DrawLine(center + leftDir * minRadius, center + leftDir * maxRadius);
+        Gizmos.DrawLine(center + rightDir * minRadius, center + rightDir * maxRadius);
+    }
+
+#if UNITY_EDITOR
+    public void GenerateMotherSpawnsInEditor()
+    {
+        if (gridSystem == null) gridSystem = FindFirstObjectByType<GridSystem>();
+        if (gridSystem == null) return;
+
+        for (int i = 0; i < generatedMotherSpawns.Length; i++)
+        {
+            if (generatedMotherSpawns[i] != null) DestroyImmediate(generatedMotherSpawns[i].gameObject);
+        }
+
+        Vector3 mid = gridSystem.MiddlePoint;
+        generatedMotherSpawns = new Transform[4];
 
         for (int i = 0; i < 4; i++)
         {
-            Gizmos.color = Color.blue;
-            Gizmos.DrawWireSphere(_playerSpawns[i], 2f);
+            float randomAngle = Random.Range(-motherSpawnAngleVariance, motherSpawnAngleVariance);
+            Vector3 randomDir = Quaternion.Euler(0, randomAngle, 0) * _baseDirections[i];
+            float randomDist = Random.Range(motherMinRadius, motherMaxRadius);
+            Vector3 spawnPos = mid + (randomDir * randomDist);
 
-            Gizmos.color = Color.red;
-            Gizmos.DrawWireCube(_motherSpawns[i] + Vector3.up * 1f, new Vector3(4, 4, 4));
+            GameObject spawnObj = new GameObject($"PreSpawn_Mother_{i + 1}");
+            spawnObj.transform.position = spawnPos;
+            spawnObj.transform.SetParent(this.transform);
 
-            Gizmos.color = new Color(1f, 1f, 1f, 0.3f);
-            Gizmos.DrawLine(_playerSpawns[i], _motherSpawns[i]);
+            generatedMotherSpawns[i] = spawnObj.transform;
+        }
+
+        UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(gameObject.scene);
+    }
+#endif
+}
+
+#if UNITY_EDITOR
+[CustomEditor(typeof(SpawnTransformHandler))]
+[CanEditMultipleObjects]
+public class SpawnTransformHandlerEditor : Editor
+{
+    public override void OnInspectorGUI()
+    {
+        DrawDefaultInspector();
+        GUILayout.Space(20);
+        if (GUILayout.Button("üé≤ ÎßàÎçî Ïä§Ìè∞ ÏúÑÏπò ÎØ∏Î¶¨ ÏÉùÏÑ±ÌïòÍ∏∞", GUILayout.Height(40)))
+        {
+            foreach (var selectedTarget in targets)
+            {
+                SpawnTransformHandler script = (SpawnTransformHandler)selectedTarget;
+                script.GenerateMotherSpawnsInEditor();
+            }
         }
     }
 }
+#endif

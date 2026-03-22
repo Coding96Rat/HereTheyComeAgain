@@ -11,7 +11,6 @@ public class Enemy : NetworkBehaviour
     private readonly SyncVar<float> _currentHealth = new SyncVar<float>();
 
     private Transform _targetPlayer;
-    private Vector3 _cachedTargetPos;
     private EnemyMother _myMother;
 
     [HideInInspector] public MeshRenderer myRenderer;
@@ -69,19 +68,13 @@ public class Enemy : NetworkBehaviour
         if (!asServer && next != null)
         {
             _myMother = next.GetComponent<EnemyMother>();
-            if (_myMother != null && motherListIndex == -1)
-            {
-                _myMother.AddEnemy(this);
-            }
+            if (_myMother != null && motherListIndex == -1) _myMother.AddEnemy(this);
         }
     }
 
     private void OnTargetSynced(NetworkObject prev, NetworkObject next, bool asServer)
     {
-        if (!asServer && next != null)
-        {
-            _targetPlayer = next.transform;
-        }
+        if (!asServer && next != null) _targetPlayer = next.transform;
     }
 
     public override void OnStopClient()
@@ -93,28 +86,24 @@ public class Enemy : NetworkBehaviour
         }
     }
 
-    public Vector3 GetTargetPosition()
+    // 💡 초기화 시 1번만 호출하여 타겟 인덱스만 Mother에게 넘겨줍니다. 
+    // Update에서 4000번씩 호출하던 대참사 방지.
+    public int GetTargetIndex()
     {
-        // 오직 서버(Host)만 타겟 생존 여부를 판단하고 새 타겟을 정할 권한을 가짐
-        if (IsServerInitialized)
-        {
-            // 치열하게 때리던 타겟(방화벽)이 파괴되거나 사라졌다면?!
-            if (_targetPlayer == null || !_targetPlayer.gameObject.activeInHierarchy)
-            {
-                // [핵심] "좀비 자신의 현재 위치"에서 가장 가까운 다음 목표물(건물, 플레이어)로 시선을 돌림!
-                Transform newTarget = EnemyMother.GetClosestTarget(transform.position);
-                _targetPlayer = newTarget;
+        if (!IsServerInitialized) return 0;
 
-                // 새 목표를 클라이언트들에게 알려 똑같이 바라보게 함
-                if (newTarget != null && newTarget.TryGetComponent(out NetworkObject netObj))
-                {
-                    _syncedTargetObj.Value = netObj;
-                }
+        if (_targetPlayer == null || !_targetPlayer.gameObject.activeInHierarchy)
+        {
+            Transform newTarget = EnemyMother.GetClosestTarget(transform.position);
+            _targetPlayer = newTarget;
+
+            if (newTarget != null && newTarget.TryGetComponent(out NetworkObject netObj))
+            {
+                _syncedTargetObj.Value = netObj;
             }
         }
 
-        if (_targetPlayer != null) _cachedTargetPos = _targetPlayer.position;
-        return _cachedTargetPos;
+        return EnemyMother.ValidTargets.IndexOf(_targetPlayer);
     }
 
     public void TakeDamage(float damageAmount)

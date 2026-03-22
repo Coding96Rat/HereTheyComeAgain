@@ -1,188 +1,331 @@
-using System.Collections;
-using System.Collections.Generic;
+ï»¿using System.Collections.Generic;
 using UnityEngine;
+using Unity.Collections;
+using Unity.Jobs;
 
 public class FlowFieldSystem : MonoBehaviour
 {
+    [Header("References")]
     private GridSystem _gridSystem;
+
+    [Header("AI Flow Field Settings")]
+    public float aiCellSize = 2f;
+
+    [Header("Physics Scan Settings (NavMesh ëŒ€ì²´)")]
+    public LayerMask walkableLayer;
+    public LayerMask obstacleLayer;
+    public float maxWalkableSlope = 45f;
+
+    [Header("Debug & Gizmos")]
+    public bool showObstacleBlocks = true; // ì—ë””í„°ì—ì„œ ë²½/ì¥ì• ë¬¼ ë¶‰ì€ìƒ‰ í‘œì‹œ
+    public bool showFlowArrows = true;     // í”Œë ˆì´ ì‹œ í™”ì‚´í‘œ í‘œì‹œ (ë ‰ ìœ ë°œ ê°€ëŠ¥í•˜ë¯€ë¡œ ë””ë²„ê·¸ìš©ìœ¼ë¡œë§Œ ì¼œì„¸ìš”)
+    [Range(0, 3)] public int debugPlayerIndex = 0; // í™”ì‚´í‘œë¥¼ ë³¼ í”Œë ˆì´ì–´ ì¸ë±ìŠ¤
+
+    // ğŸ’¡ [ì—ë””í„° ì €ì¥ìš© ë°ì´í„°] NativeArrayëŠ” ì—ë””í„°ì—ì„œ ë‚ ì•„ê°€ê¸° ë•Œë¬¸ì— ì¼ë°˜ ë°°ì—´ë¡œ ì €ì¥í•©ë‹ˆë‹¤.
+    [SerializeField, HideInInspector] private byte[] _savedCostField;
+    [SerializeField, HideInInspector] private int _savedCols, _savedRows;
+    [SerializeField, HideInInspector] private Vector3 _savedBottomLeft;
+
     private int _cols, _rows;
+    private Vector3 _bottomLeft;
 
-    private List<Vector3[,]> _playerFlowFields = new List<Vector3[,]>();
-    private int[,] _integrationField;
-    private bool _isUpdating = false;
+    private NativeArray<byte> _costField;
+    private NativeArray<int>[] _integrationFields;
+    public NativeArray<Vector3>[] NativeFlowFields;
 
-    // [ÃÖÀûÈ­ ÇÙ½É] ¸Å¹ø Find¸¦ ¾²Áö ¾Ê±â À§ÇØ ÇÃ·¹ÀÌ¾î ¸®½ºÆ®¸¦ Ä³½ÌÇØµÓ´Ï´Ù.
     private List<Transform> _targetPlayers;
-
-    private static readonly Vector2Int[] neighbors = {
-        Vector2Int.up, Vector2Int.down, Vector2Int.left, Vector2Int.right,
-        new Vector2Int(1, 1), new Vector2Int(1, -1), new Vector2Int(-1, 1), new Vector2Int(-1, -1)
-    };
-    private static readonly int[] costs = { 10, 10, 10, 10, 14, 14, 14, 14 };
-
-    private List<Vector2Int>[] _touchedCellsPerPlayer;
-    private Queue<Vector2Int> _bfsQueue = new Queue<Vector2Int>(5000);
-
-
 
     private void Awake()
     {
         _gridSystem = FindFirstObjectByType<GridSystem>();
     }
 
+    private void OnDestroy()
+    {
+        if (_costField.IsCreated) _costField.Dispose();
+
+        if (NativeFlowFields != null)
+        {
+            for (int i = 0; i < NativeFlowFields.Length; i++)
+            {
+                if (NativeFlowFields[i].IsCreated) NativeFlowFields[i].Dispose();
+                if (_integrationFields != null && _integrationFields[i].IsCreated) _integrationFields[i].Dispose();
+            }
+        }
+    }
+
     public void Initialize(int maxPlayers = 4)
     {
-        if (_gridSystem == null) return;
-        _cols = _gridSystem.Columns;
-        _rows = _gridSystem.Rows;
+        if (_gridSystem == null) _gridSystem = FindFirstObjectByType<GridSystem>();
 
-        _integrationField = new int[_cols, _rows];
-        _touchedCellsPerPlayer = new List<Vector2Int>[maxPlayers];
-
-        for (int x = 0; x < _cols; x++)
+        // ğŸ’¡ ì—ë””í„°ì—ì„œ êµ¬ì›Œë‘” ë°ì´í„°ê°€ ìˆìœ¼ë©´ ê·¸ëŒ€ë¡œ ë¡œë“œí•©ë‹ˆë‹¤ (ë¡œë”© ì‹œê°„ 0ì´ˆ!)
+        if (_savedCostField != null && _savedCostField.Length > 0)
         {
-            for (int z = 0; z < _rows; z++) _integrationField[x, z] = int.MaxValue;
+            _cols = _savedCols;
+            _rows = _savedRows;
+            _bottomLeft = _savedBottomLeft;
         }
+        else
+        {
+            float mapWidth = _gridSystem.Columns * _gridSystem.CellSize;
+            float mapHeight = _gridSystem.Rows * _gridSystem.CellSize;
+            _bottomLeft = _gridSystem.GetBottomLeft();
+            _cols = Mathf.CeilToInt(mapWidth / aiCellSize);
+            _rows = Mathf.CeilToInt(mapHeight / aiCellSize);
+        }
+
+        int totalCells = _cols * _rows;
+
+        _costField = new NativeArray<byte>(totalCells, Allocator.Persistent);
+        _integrationFields = new NativeArray<int>[maxPlayers];
+        NativeFlowFields = new NativeArray<Vector3>[maxPlayers];
 
         for (int i = 0; i < maxPlayers; i++)
         {
-            _playerFlowFields.Add(new Vector3[_cols, _rows]);
-            _touchedCellsPerPlayer[i] = new List<Vector2Int>(10000);
+            _integrationFields[i] = new NativeArray<int>(totalCells, Allocator.Persistent);
+            NativeFlowFields[i] = new NativeArray<Vector3>(totalCells, Allocator.Persistent);
+        }
+
+        // êµ¬ì›Œë‘” ë°ì´í„°ë¥¼ NativeArrayë¡œ ì´ˆê³ ì† ë³µì‚¬
+        if (_savedCostField != null && _savedCostField.Length == totalCells)
+        {
+            _costField.CopyFrom(_savedCostField);
+        }
+        else
+        {
+            // êµ¬ì›Œë‘” ê²Œ ì—†ìœ¼ë©´ ê²Œì„ ì‹œì‘í•  ë•Œ ê°•ì œë¡œ í•œ ë²ˆ êµ½ìŠµë‹ˆë‹¤.
+            BakeInEditor();
+            _costField.CopyFrom(_savedCostField);
         }
     }
 
+    // =========================================================================
+    // ğŸ’¡ 1. ì—ë””í„° êµ½ê¸° ê¸°ëŠ¥ (ìš°í´ë¦­ ë©”ë‰´ì—ì„œ ì‹¤í–‰)
+    // =========================================================================
+    [ContextMenu("Bake FFS In Editor (ë¬¼ë¦¬ ìŠ¤ìº”)")]
+    public void BakeInEditor()
+    {
+        if (_gridSystem == null) _gridSystem = FindFirstObjectByType<GridSystem>();
+        if (_gridSystem == null) { Debug.LogError("GridSystemì„ ì°¾ì„ ìˆ˜ ì—†ìŠµë‹ˆë‹¤."); return; }
+
+        float mapWidth = _gridSystem.Columns * _gridSystem.CellSize;
+        float mapHeight = _gridSystem.Rows * _gridSystem.CellSize;
+        _savedBottomLeft = _gridSystem.GetBottomLeft();
+        _savedCols = Mathf.CeilToInt(mapWidth / aiCellSize);
+        _savedRows = Mathf.CeilToInt(mapHeight / aiCellSize);
+
+        int totalCells = _savedCols * _savedRows;
+        _savedCostField = new byte[totalCells];
+
+        float rayHeight = _gridSystem.MiddlePoint.y + 100f;
+
+        for (int x = 0; x < _savedCols; x++)
+        {
+            for (int z = 0; z < _savedRows; z++)
+            {
+                int flatIndex = z * _savedCols + x;
+                Vector3 cellCenter = _savedBottomLeft + new Vector3(x * aiCellSize + (aiCellSize / 2f), 0, z * aiCellSize + (aiCellSize / 2f));
+                Vector3 rayOrigin = new Vector3(cellCenter.x, rayHeight, cellCenter.z);
+
+                if (Physics.SphereCast(rayOrigin, aiCellSize * 0.45f, Vector3.down, out RaycastHit hit, 200f, walkableLayer | obstacleLayer))
+                {
+                    // ğŸ’¡ ìˆ˜ì •: ì¥ì• ë¬¼ ë ˆì´ì–´ì— ë‹¿ì•˜ê±°ë‚˜ ê²½ì‚¬ê°€ ì„¤ì •ê°’(45ë„)ë³´ë‹¤ í¬ë©´ ë¬´ì¡°ê±´ ë²½(255)
+                    float slopeAngle = Vector3.Angle(Vector3.up, hit.normal);
+                    bool isObstacleLayer = (obstacleLayer.value & (1 << hit.transform.gameObject.layer)) > 0;
+
+                    if (isObstacleLayer || slopeAngle > maxWalkableSlope)
+                    {
+                        _savedCostField[flatIndex] = 255;
+                        continue;
+                    }
+
+                    // ğŸ’¡ ìˆ˜ì •: ì§€í˜•ì´ ë„ˆë¬´ ê¸‰ê²©íˆ ë³€í•˜ëŠ” êµ¬ê°„(ì ˆë²½ ë ë“±)ë„ ë²½ìœ¼ë¡œ ê°„ì£¼í•˜ì—¬ ì¶”ë½ ë°©ì§€
+                    if (Physics.Raycast(hit.point + Vector3.up * 0.1f, Vector3.down, 0.5f) == false)
+                    {
+                        _savedCostField[flatIndex] = 255;
+                        continue;
+                    }
+
+                    _savedCostField[flatIndex] = (Physics.CheckSphere(hit.point, 1.2f, obstacleLayer)) ? (byte)5 : (byte)1;
+                }
+            }
+        }
+        Debug.Log($"[FFS] ë§µ ìŠ¤ìº” ì™„ë£Œ! ({totalCells}ì¹¸ êµ¬ì›Œì§)");
+    }
+
+    // =========================================================================
+    // ğŸ’¡ 2. ë™ì  ì¥ì• ë¬¼ ë¶€ë¶„ ì—…ë°ì´íŠ¸ ê¸°ëŠ¥ (ëŸ°íƒ€ì„ìš©)
+    // =========================================================================
+    /// <summary>
+    /// ê²Œì„ ë„ì¤‘ ë¬¸ì´ ì—´ë¦¬ê±°ë‚˜ ë°”ë¦¬ì¼€ì´ë“œê°€ ì³ì§€ë©´ í˜¸ì¶œí•˜ì„¸ìš”!
+    /// ffs.UpdateDynamicObstacleRegion(door.position, 5f);
+    /// </summary>
+    public void UpdateDynamicObstacleRegion(Vector3 centerPosition, float radius)
+    {
+        if (!_costField.IsCreated) return;
+
+        // ë°˜ê²½ ë‚´ì— í¬í•¨ë˜ëŠ” ê·¸ë¦¬ë“œ ì¸ë±ìŠ¤ ë²”ìœ„ ê³„ì‚° (ë¶ˆí•„ìš”í•œ ì „ì²´ ë£¨í”„ ë°©ì§€)
+        int minX = Mathf.Max(0, Mathf.FloorToInt((centerPosition.x - radius - _bottomLeft.x) / aiCellSize));
+        int maxX = Mathf.Min(_cols - 1, Mathf.FloorToInt((centerPosition.x + radius - _bottomLeft.x) / aiCellSize));
+        int minZ = Mathf.Max(0, Mathf.FloorToInt((centerPosition.z - radius - _bottomLeft.z) / aiCellSize));
+        int maxZ = Mathf.Min(_rows - 1, Mathf.FloorToInt((centerPosition.z + radius - _bottomLeft.z) / aiCellSize));
+
+        float rayHeight = centerPosition.y + 50f;
+
+        // ë”± ë³€í™”ê°€ ì¼ì–´ë‚œ n x n ì¹¸ë§Œ ë‹¤ì‹œ ë ˆì´ì €ë¥¼ ì´ì„œ ì—…ë°ì´íŠ¸í•©ë‹ˆë‹¤. (í”„ë ˆì„ ì €í•˜ 0%)
+        for (int x = minX; x <= maxX; x++)
+        {
+            for (int z = minZ; z <= maxZ; z++)
+            {
+                int flatIndex = z * _cols + x;
+                Vector3 cellCenter = _bottomLeft + new Vector3(x * aiCellSize + (aiCellSize / 2f), 0, z * aiCellSize + (aiCellSize / 2f));
+                Vector3 rayOrigin = new Vector3(cellCenter.x, rayHeight, cellCenter.z);
+
+                byte newCost = 255; // ê¸°ë³¸ê°’ ë§‰í˜
+
+                if (Physics.SphereCast(rayOrigin, aiCellSize * 0.4f, Vector3.down, out RaycastHit hit, 100f, walkableLayer | obstacleLayer))
+                {
+                    if ((obstacleLayer.value & (1 << hit.transform.gameObject.layer)) == 0)
+                    {
+                        float slopeAngle = Vector3.Angle(Vector3.up, hit.normal);
+                        if (slopeAngle <= maxWalkableSlope)
+                        {
+                            if (Physics.CheckSphere(hit.point, 1.5f, obstacleLayer)) newCost = 5;
+                            else newCost = 1;
+                        }
+                    }
+                }
+
+                // NativeArrayì— ì¦‰ì‹œ ì ìš© (ë‹¤ìŒ í”„ë ˆì„ë¶€í„° ì¢€ë¹„ë“¤ì´ ì•Œì•„ì„œ í”¼í•´ê°)
+                _costField[flatIndex] = newCost;
+            }
+        }
+    }
+
+    // =========================================================================
+    // 3. ëŸ°íƒ€ì„ ì—…ë°ì´íŠ¸ (Job System) - ì´ì „ê³¼ ë™ì¼
+    // =========================================================================
     public void StartUpdatingFlowFields(List<Transform> activePlayers)
     {
-        // ¿şÀÌºê°¡ ½ÃÀÛµÉ ¶§ ¹Ş¾Æ¿Â ÇÃ·¹ÀÌ¾î ¸®½ºÆ®¸¦ ÀúÀåÇØµÓ´Ï´Ù (ÂüÁ¶ ÃÖÀûÈ­ O(1))
         _targetPlayers = activePlayers;
-
-        if (!_isUpdating)
-        {
-            _isUpdating = true;
-            StartCoroutine(UpdateFlowFieldsRoutine(activePlayers));
-        }
     }
 
-    private IEnumerator UpdateFlowFieldsRoutine(List<Transform> activePlayers)
+    private void Update()
     {
-        while (_isUpdating)
-        {
-            for (int i = 0; i < activePlayers.Count; i++)
-            {
-                if (activePlayers[i] == null) continue;
-                _gridSystem.GetGridPosition(activePlayers[i].position, out int pX, out int pZ);
+        if (_targetPlayers == null || _targetPlayers.Count == 0 || !_costField.IsCreated) return;
 
-                // ÇÃ·¹ÀÌ¾î 1¸í¾¿ ¿ÏÀüÈ÷ µ¶¸³µÈ ÄÚ·çÆ¾À¸·Î °è»êÀ» À§ÀÓÇÕ´Ï´Ù.
-                yield return StartCoroutine(GenerateFlowFieldForPlayerRoutine(new Vector2Int(pX, pZ), i));
-            }
-            // [À¯Àú ¾ÆÀÌµğ¾î Àû¿ë] 2.5ÃÊ °£°İÀ¸·Î ÇÃ·¹ÀÌ¾îÀÇ '°ú°Å ½º³À¼¦ ÁÂÇ¥'¸¦ °»½Å
-            yield return new WaitForSeconds(2.5f);
+        int playerCount = Mathf.Min(_targetPlayers.Count, 4);
+        NativeArray<JobHandle> vectorHandles = new NativeArray<JobHandle>(playerCount, Allocator.Temp);
+
+        for (int i = 0; i < playerCount; i++)
+        {
+            if (_targetPlayers[i] == null || !_targetPlayers[i].gameObject.activeInHierarchy) continue;
+
+            Vector3 pPos = _targetPlayers[i].position;
+            int pX = Mathf.FloorToInt((pPos.x - _bottomLeft.x) / aiCellSize);
+            int pZ = Mathf.FloorToInt((pPos.z - _bottomLeft.z) / aiCellSize);
+
+            IntegrationFieldJob intJob = new IntegrationFieldJob
+            {
+                CostField = _costField,
+                IntegrationField = _integrationFields[i],
+                GridCols = _cols,
+                GridRows = _rows,
+                TargetCell = new Unity.Mathematics.int2(pX, pZ)
+            };
+            JobHandle intHandle = intJob.Schedule();
+
+            VectorFieldJob vecJob = new VectorFieldJob
+            {
+                IntegrationField = _integrationFields[i],
+                CostField = _costField,
+                FlowField = NativeFlowFields[i],
+                GridCols = _cols,
+                GridRows = _rows,
+
+                BottomLeft = _bottomLeft,
+                AiCellSize = aiCellSize,
+                TargetPos = _targetPlayers[i].position
+            };
+            vectorHandles[i] = vecJob.Schedule(_cols * _rows, 64, intHandle);
         }
+
+        JobHandle.CompleteAll(vectorHandles);
+        vectorHandles.Dispose();
     }
 
-    // ¿ÏÀüÈ÷ ºñµ¿±â·Î ÀÛµ¿ÇÏ¿© ·ºÀ» À¯¹ßÇÏÁö ¾Ê´Â ±âÀûÀÇ ±æÃ£±â ÄÚ·çÆ¾
-    private IEnumerator GenerateFlowFieldForPlayerRoutine(Vector2Int targetPos, int playerIndex)
+    // =========================================================================
+    // ğŸ’¡ 4. ê¸°ì¦ˆëª¨(Gizmos) ì‹œê°í™” - ì—ë””í„° ë° ëŸ°íƒ€ì„ì—ì„œ ëˆˆìœ¼ë¡œ í™•ì¸
+    // =========================================================================
+    // ğŸ’¡ Selectedë¥¼ ì§€ì›Œì„œ í•­ìƒ ë³´ì´ê²Œ ë§Œë“­ë‹ˆë‹¤!
+    private void OnDrawGizmos()
     {
-        List<Vector2Int> touchedCells = _touchedCellsPerPlayer[playerIndex];
+        if (_savedCols == 0 || _savedRows == 0) return;
 
-        for (int i = 0; i < touchedCells.Count; i++)
+        Vector3 centerOffset = new Vector3(aiCellSize / 2f, 0, aiCellSize / 2f);
+        Vector3 cubeSize = new Vector3(aiCellSize, 0.2f, aiCellSize);
+
+        // 1. ì—ë””í„°/í”Œë ˆì´ ìƒíƒœ ìƒê´€ì—†ì´ ì¥ì• ë¬¼(ë²½) í‘œì‹œ
+        if (showObstacleBlocks && _savedCostField != null && _savedCostField.Length > 0)
         {
-            _integrationField[touchedCells[i].x, touchedCells[i].y] = int.MaxValue;
-        }
-        touchedCells.Clear();
-        _bfsQueue.Clear();
+            bool useRuntime = Application.isPlaying && _costField.IsCreated;
 
-        if (targetPos.x >= 0 && targetPos.x < _cols && targetPos.y >= 0 && targetPos.y < _rows)
-        {
-            _integrationField[targetPos.x, targetPos.y] = 0;
-            _bfsQueue.Enqueue(targetPos);
-            touchedCells.Add(targetPos);
-        }
-
-        int iterationsThisFrame = 0;
-
-        // 1. °Å¸® °è»ê (ÇÁ·¹ÀÓ ÂÉ°³±â)
-        while (_bfsQueue.Count > 0)
-        {
-            Vector2Int curr = _bfsQueue.Dequeue();
-            int currentCost = _integrationField[curr.x, curr.y];
-
-            for (int i = 0; i < 8; i++)
+            for (int x = 0; x < _savedCols; x++)
             {
-                Vector2Int next = curr + neighbors[i];
-
-                if (next.x < 0 || next.x >= _cols || next.y < 0 || next.y >= _rows) continue;
-                if (_gridSystem.IsOccupied(next.x, next.y)) continue;
-                if (i >= 4 && _gridSystem.IsOccupied(curr.x, next.y) && _gridSystem.IsOccupied(next.x, curr.y)) continue;
-
-                int newCost = currentCost + costs[i];
-                if (newCost < _integrationField[next.x, next.y])
+                for (int z = 0; z < _savedRows; z++)
                 {
-                    if (_integrationField[next.x, next.y] == int.MaxValue) touchedCells.Add(next);
-                    _integrationField[next.x, next.y] = newCost;
-                    _bfsQueue.Enqueue(next);
+                    int flatIndex = z * _savedCols + x;
+                    byte cost = useRuntime ? _costField[flatIndex] : _savedCostField[flatIndex];
+
+                    if (cost == 255)
+                    {
+                        Gizmos.color = new Color(1f, 0f, 0f, 0.5f);
+                        Vector3 pos = _savedBottomLeft + new Vector3(x * aiCellSize, 0, z * aiCellSize) + centerOffset;
+                        Gizmos.DrawCube(pos, cubeSize);
+                    }
+                    else if (cost == 5)
+                    {
+                        Gizmos.color = new Color(1f, 1f, 0f, 0.3f);
+                        Vector3 pos = _savedBottomLeft + new Vector3(x * aiCellSize, 0, z * aiCellSize) + centerOffset;
+                        Gizmos.DrawCube(pos, cubeSize);
+                    }
                 }
             }
-
-            iterationsThisFrame++;
-            // ÇÙ½É ¹æ¾î¸·: 1ÇÁ·¹ÀÓ¿¡ 3000Ä­ ÀÌ»ó °è»êÇßÀ¸¸é ¹«Á¶°Ç ½¬¾ú´Ù°¡ ´ÙÀ½ ÇÁ·¹ÀÓ¿¡ ÁøÇà (·º ¹æÁö)
-            if (iterationsThisFrame > 3000)
-            {
-                iterationsThisFrame = 0;
-                yield return null;
-            }
         }
 
-        iterationsThisFrame = 0;
-
-        // 2. È­»ìÇ¥ ¹æÇâ ¼³Á¤ (ÇÁ·¹ÀÓ ÂÉ°³±â)
-        for (int j = 0; j < touchedCells.Count; j++)
+        // 2. í”Œë ˆì´ ìƒíƒœì¼ ë•Œ ì‹¤ì‹œê°„ í™”ì‚´í‘œ í‘œì‹œ
+        if (showFlowArrows && Application.isPlaying && NativeFlowFields != null)
         {
-            Vector2Int cell = touchedCells[j];
-            int bestCost = _integrationField[cell.x, cell.y];
-            Vector3 bestDir = Vector3.zero;
+            if (debugPlayerIndex < 0 || debugPlayerIndex >= NativeFlowFields.Length) return;
+            if (!NativeFlowFields[debugPlayerIndex].IsCreated) return;
 
-            for (int i = 0; i < 8; i++)
+            // ğŸ’¡ ì„ ì„ ë” ì˜ ë³´ì´ê²Œ ë§ˆì  íƒ€(ë¶„í™)ìƒ‰ìœ¼ë¡œ ë³€ê²½!
+            Gizmos.color = Color.magenta;
+
+            for (int x = 0; x < _cols; x++)
             {
-                Vector2Int n = cell + neighbors[i];
-                if (n.x < 0 || n.x >= _cols || n.y < 0 || n.y >= _rows) continue;
-
-                if (_integrationField[n.x, n.y] < bestCost)
+                for (int z = 0; z < _rows; z++)
                 {
-                    bestCost = _integrationField[n.x, n.y];
-                    bestDir = new Vector3(neighbors[i].x, 0, neighbors[i].y);
+                    int flatIndex = z * _cols + x;
+                    if (_costField[flatIndex] == 255) continue;
+
+                    Vector3 dir = NativeFlowFields[debugPlayerIndex][flatIndex];
+                    if (dir.sqrMagnitude > 0.1f)
+                    {
+                        // ğŸ’¡ Yì¶•ì„ 3.0fë¡œ í™• ë„ì›Œì„œ ì§€í˜•ì— ì ˆëŒ€ íŒŒë¬»íˆì§€ ì•Šê²Œ ë§Œë“­ë‹ˆë‹¤!
+                        Vector3 startPos = _bottomLeft + new Vector3(x * aiCellSize, 3.0f, z * aiCellSize) + centerOffset;
+                        Vector3 endPos = startPos + (dir * aiCellSize * 0.8f);
+
+                        Gizmos.DrawLine(startPos, endPos);
+                        // ğŸ’¡ êµ¬ìŠ¬ í¬ê¸°ë„ ì‚´ì§ í‚¤ì›€
+                        Gizmos.DrawSphere(endPos, 0.3f);
+                    }
                 }
             }
-            _playerFlowFields[playerIndex][cell.x, cell.y] = bestDir.normalized;
-
-            iterationsThisFrame++;
-            // ¿©±âµµ ¸¶Âù°¡Áö·Î 5000Ä­¸¶´Ù ÈŞ½Ä
-            if (iterationsThisFrame > 5000)
-            {
-                iterationsThisFrame = 0;
-                yield return null;
-            }
         }
     }
 
-    public Vector3 GetFlowDirection(int targetIndex, Vector3 worldPos)
-    {
-        if (targetIndex < 0 || targetIndex >= _playerFlowFields.Count) return Vector3.zero;
-        _gridSystem.GetGridPosition(worldPos, out int x, out int z);
-        if (x >= 0 && x < _cols && z >= 0 && z < _rows) return _playerFlowFields[targetIndex][x, z];
-        return Vector3.zero;
-    }
-
-    // Å¸°Ù ÇÃ·¹ÀÌ¾îÀÇ ÇöÀç ½ÇÁ¦ ÁÂÇ¥¸¦ ¹İÈ¯ÇÏ´Â ÇÔ¼ö (O(1) ÃÖÀûÈ­ °Ë»ö)
-    public Vector3 GetTargetPlayerPosition(int targetIndex)
-    {
-        // ¹æ¾î ·ÎÁ÷: ¸®½ºÆ®°¡ ¾ÆÁ÷ ¾ø°Å³ª, ÀÎµ¦½º ¹øÈ£°¡ Àß¸øµÇ¾ú°Å³ª, ÇÃ·¹ÀÌ¾î°¡ Á×¾î¼­ »ç¶óÁ³À» °æ¿ì
-        if (_targetPlayers == null || targetIndex < 0 || targetIndex >= _targetPlayers.Count || _targetPlayers[targetIndex] == null)
-        {
-            return Vector3.zero;
-        }
-
-        // ÀúÀåÇØµĞ ¸®½ºÆ®¿¡¼­ ´ÙÀÌ·ºÆ®·Î À§Ä¡¸¦ »Ì¾ÆÁİ´Ï´Ù.
-        return _targetPlayers[targetIndex].position;
-    }
+    public int GridCols => _cols;
+    public int GridRows => _rows;
+    public Vector3 BottomLeft => _bottomLeft;
 }
