@@ -72,67 +72,66 @@ public class SpawnTransformHandler : NetworkBehaviour
         playerSpawner.Spawns = newSpawns;
     }
 
-    public override void OnStartServer()
+    public override void OnStartNetwork()
     {
-        base.OnStartServer();
+        base.OnStartNetwork();
 
-        // 1. FlowFieldSystem 세팅
+        // 1. FlowFieldSystem 세팅 및 Target 등록 (모든 클라이언트가 타겟을 공유해야 함)
         FlowFieldSystem ffs = FindFirstObjectByType<FlowFieldSystem>();
         if (ffs != null)
         {
             ffs.Initialize(4);
-
             EnemyMother.ValidTargets.Clear();
-            List<Transform> flowTargets = new List<Transform>();
 
             for (int i = 0; i < playerFirewalls.Length; i++)
             {
                 if (playerFirewalls[i] != null)
                 {
-                    flowTargets.Add(playerFirewalls[i]);
-                    EnemyMother.ValidTargets.Add(playerFirewalls[i]); // 마더 공통 타겟에 등록!
+                    EnemyMother.ValidTargets.Add(playerFirewalls[i]);
                 }
             }
-            ffs.StartUpdatingFlowFields(flowTargets);
         }
 
-        Vector3 mid = gridSystem != null ? gridSystem.MiddlePoint : Vector3.zero;
-
-        // 2. Mother 스폰
-        for (int i = 0; i < 4; i++)
+        // 2. Mother 스폰 (이건 무조건 서버에서만 스폰해야 함!)
+        if (IsServerInitialized)
         {
-            Vector3 finalMotherPos;
+            Vector3 mid = gridSystem != null ? gridSystem.MiddlePoint : Vector3.zero;
 
-            if (generatedMotherSpawns.Length > i && generatedMotherSpawns[i] != null)
+            for (int i = 0; i < 4; i++)
             {
-                finalMotherPos = generatedMotherSpawns[i].position;
-            }
-            else
-            {
-                float randomAngle = Random.Range(-motherSpawnAngleVariance, motherSpawnAngleVariance);
-                Vector3 randomDir = Quaternion.Euler(0, randomAngle, 0) * _baseDirections[i];
-                float randomDist = Random.Range(motherMinRadius, motherMaxRadius);
-                finalMotherPos = mid + (randomDir * randomDist);
-            }
+                Vector3 finalMotherPos;
 
-            GameObject mother = Instantiate(enemyMotherPrefab, finalMotherPos, Quaternion.identity);
-
-            if (mother.TryGetComponent(out EnemyMother motherScript))
-            {
-                if (i < playerFirewalls.Length && playerFirewalls[i] != null)
-                    motherScript.dedicatedTarget = playerFirewalls[i];
-
-                if (stairEntrances != null && stairEntrances.Length > 0)
+                if (generatedMotherSpawns.Length > i && generatedMotherSpawns[i] != null)
                 {
-                    motherScript.injectedStairs = new Vector3[stairEntrances.Length];
-                    for (int j = 0; j < stairEntrances.Length; j++)
+                    finalMotherPos = generatedMotherSpawns[i].position;
+                }
+                else
+                {
+                    float randomAngle = Random.Range(-motherSpawnAngleVariance, motherSpawnAngleVariance);
+                    Vector3 randomDir = Quaternion.Euler(0, randomAngle, 0) * _baseDirections[i];
+                    float randomDist = Random.Range(motherMinRadius, motherMaxRadius);
+                    finalMotherPos = mid + (randomDir * randomDist);
+                }
+
+                GameObject mother = Instantiate(enemyMotherPrefab, finalMotherPos, Quaternion.identity);
+
+                if (mother.TryGetComponent(out EnemyMother motherScript))
+                {
+                    if (i < playerFirewalls.Length && playerFirewalls[i] != null)
+                        motherScript.dedicatedTarget = playerFirewalls[i];
+
+                    if (stairEntrances != null && stairEntrances.Length > 0)
                     {
-                        if (stairEntrances[j] != null)
-                            motherScript.injectedStairs[j] = stairEntrances[j].position;
+                        motherScript.injectedStairs = new Vector3[stairEntrances.Length];
+                        for (int j = 0; j < stairEntrances.Length; j++)
+                        {
+                            if (stairEntrances[j] != null)
+                                motherScript.injectedStairs[j] = stairEntrances[j].position;
+                        }
                     }
                 }
+                ServerManager.Spawn(mother);
             }
-            ServerManager.Spawn(mother);
         }
     }
 
