@@ -514,41 +514,37 @@ namespace FishNet.Object
             if (option.FastContains(GetNetworkObjectOption.Self))
                 cache.Add(this);
 
-            // Becomes true if any nested flags were specified.
             bool includesNested = false;
 
-            /* Add runtime first since these values are dynamic, and can affect
-             * initialized nested. For example, a nested scene object can be moved within itself,
-             * which would make returning all nested have entries twice.
-             *
-             * While a hashset is being used, which would make this impossible, for future sake if we
-             * switch to a list this scenario is here. */
             if (option.FastContains(GetNetworkObjectOption.RuntimeNested))
             {
-                foreach (NetworkBehaviour nb in RuntimeChildNetworkBehaviours)
-                    cache.Add(nb.NetworkObject);
-
+                // ✅ Unity6 OnDestroy 순서 불일치 버그 패치
+                if (RuntimeChildNetworkBehaviours != null)
+                {
+                    foreach (NetworkBehaviour nb in RuntimeChildNetworkBehaviours)
+                    {
+                        if (nb != null && nb.NetworkObject != null)
+                            cache.Add(nb.NetworkObject);
+                    }
+                }
                 includesNested = true;
             }
-
 
             if (option.FastContains(GetNetworkObjectOption.InitializedNested))
             {
-                cache.AddRangeUnique(InitializedNestedNetworkObjects);
-
+                // ✅ InitializedNestedNetworkObjects null 패치
+                if (InitializedNestedNetworkObjects != null)
+                    cache.AddRangeUnique(InitializedNestedNetworkObjects);
                 includesNested = true;
             }
 
-
             if (includesNested && option.FastContains(GetNetworkObjectOption.Recursive))
             {
-                /* Remove include self from options otherwise
-                 * each nested entry would get added twice. */
                 option &= ~GetNetworkObjectOption.Self;
-
                 int count = cache.Count;
                 for (int i = 0; i < count; i++)
                 {
+                    if (cache[i] == null) continue; // ✅ recursive 순회 중 null 방어
                     List<NetworkObject> recursiveCache = cache[i].GetNetworkObjects(option);
                     cache.AddRangeUnique(recursiveCache);
                     CollectionCaches<NetworkObject>.Store(recursiveCache);
@@ -1409,7 +1405,7 @@ namespace FishNet.Object
         }
 
         #region Editor.
-        #if UNITY_EDITOR
+#if UNITY_EDITOR
         /// <summary>
         /// Removes duplicate NetworkObject components on this object returning the removed count.
         /// </summary>
@@ -1428,7 +1424,7 @@ namespace FishNet.Object
             if (ApplicationState.IsPlaying())
                 return;
 
-            #if UNITY_EDITOR
+#if UNITY_EDITOR
             if (setWasActiveDuringEdit)
             {
                 bool hasNetworkObjectParent = false;
@@ -1450,7 +1446,7 @@ namespace FishNet.Object
 
             if (setSceneId)
                 CreateSceneId(force: false);
-            #endif
+#endif
         }
 
         private void OnValidate()
@@ -1465,7 +1461,7 @@ namespace FishNet.Object
         {
             ReferenceIds_Reset();
         }
-        #endif
+#endif
         #endregion
     }
 }

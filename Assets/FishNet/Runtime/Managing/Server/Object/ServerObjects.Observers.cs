@@ -440,9 +440,15 @@ namespace FishNet.Managing.Server
 
             _writer.Clear();
 
-            /* If there is change then also rebuild recursive networkObjects. */
-            foreach (NetworkBehaviour item in nob.RuntimeChildNetworkBehaviours)
-                RebuildObservers(item.NetworkObject, conn, timedOnly);
+            // 수정 후
+            if (nob.RuntimeChildNetworkBehaviours != null) // ✅
+            {
+                foreach (NetworkBehaviour item in nob.RuntimeChildNetworkBehaviours)
+                {
+                    if (item != null && item.NetworkObject != null) // ✅
+                        RebuildObservers(item.NetworkObject, conn, timedOnly);
+                }
+            }
         }
 
         /// <summary>
@@ -479,8 +485,15 @@ namespace FishNet.Managing.Server
              * in relation to parent.
              *
              * If here there is change. */
-            foreach (NetworkBehaviour item in nob.RuntimeChildNetworkBehaviours)
-                RebuildObservers(item.NetworkObject, conn, addedNobs, timedOnly);
+            // 수정 후
+            if (nob.RuntimeChildNetworkBehaviours != null) // ✅
+            {
+                foreach (NetworkBehaviour item in nob.RuntimeChildNetworkBehaviours)
+                {
+                    if (item != null && item.NetworkObject != null) // ✅
+                        RebuildObservers(item.NetworkObject, conn, addedNobs, timedOnly);
+                }
+            }
         }
     }
 }

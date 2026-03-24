@@ -1,6 +1,8 @@
 ﻿using UnityEngine;
 using FishNet.Object;
 using FishNet.Component.Spawning;
+using FishNet.Connection;
+using FishNet.Managing.Scened;
 using System.Collections.Generic;
 
 #if UNITY_EDITOR
@@ -11,7 +13,6 @@ public class SpawnTransformHandler : NetworkBehaviour
 {
     [Header("References")]
     public GridSystem gridSystem;
-    public PlayerSpawner playerSpawner;
     public GameObject enemyMotherPrefab;
 
     [Header("Player Cross Settings")]
@@ -36,105 +37,147 @@ public class SpawnTransformHandler : NetworkBehaviour
     private Vector3[] _playerSpawns = new Vector3[4];
     private readonly Vector3[] _baseDirections = { Vector3.forward, Vector3.back, Vector3.right, Vector3.left };
 
+    private bool _isStageSetup = false;
+
     private void Awake()
     {
         if (gridSystem == null) gridSystem = FindFirstObjectByType<GridSystem>();
-        if (playerSpawner == null) playerSpawner = GetComponent<PlayerSpawner>();
-
         CalculatePlayerSpawns();
-        ApplyPlayerSpawnsToFishNet();
+
+        // 씬이 켜지면 PlayerSpawner 스폰 좌표를 새 좌표로 교체
+        PlayerSpawner playerSpawner = FindFirstObjectByType<PlayerSpawner>();
+
+        if (playerSpawner != null)
+        {
+            Transform[] newSpawns = new Transform[4];
+            for (int i = 0; i < 4; i++)
+            {
+                GameObject spawnPoint = new GameObject($"DynamicSpawn_Player_{i + 1}");
+                spawnPoint.transform.position = _playerSpawns[i];
+                newSpawns[i] = spawnPoint.transform;
+            }
+
+            playerSpawner.Spawns = newSpawns;
+            Debug.Log("[StageScene] PlayerSpawner 스폰 좌표 교체 완료!");
+        }
+    }
+
+    public override void OnStartServer()
+    {
+        base.OnStartServer();
+        base.SceneManager.OnLoadEnd += SceneManager_OnLoadEnd;
+    }
+
+    public override void OnStopServer()
+    {
+        base.OnStopServer();
+        if (base.NetworkManager != null && base.SceneManager != null)
+            base.SceneManager.OnLoadEnd -= SceneManager_OnLoadEnd;
+    }
+
+    private void SceneManager_OnLoadEnd(SceneLoadEndEventArgs args)
+    {
+        if (_isStageSetup) return;
+        _isStageSetup = true;
+        base.SceneManager.OnLoadEnd -= SceneManager_OnLoadEnd;
+
+        SetupStage();
+    }
+
+    private void SetupStage()
+    {
+        FlowFieldSystem ffs = FindFirstObjectByType<FlowFieldSystem>();
+        if (ffs != null)
+        {
+            ffs.Initialize(4);
+            // 💡 치명적 에러 원흉 삭제! 방화벽은 배열 한계를 터뜨리므로 넣지 않습니다.
+            EnemyMother.ValidTargets.Clear();
+        }
+
+        SpawnMothers();
+        TeleportPlayers();
     }
 
     private void CalculatePlayerSpawns()
     {
         if (gridSystem == null) return;
         Vector3 mid = gridSystem.MiddlePoint;
-
-        _playerSpawns[0] = mid + _baseDirections[0] * playerOffsetFromCenter;
-        _playerSpawns[1] = mid + _baseDirections[1] * playerOffsetFromCenter;
-        _playerSpawns[2] = mid + _baseDirections[2] * playerOffsetFromCenter;
-        _playerSpawns[3] = mid + _baseDirections[3] * playerOffsetFromCenter;
-
-        for (int i = 0; i < 4; i++) _playerSpawns[i].y = playerSpawnHeight;
-    }
-
-    private void ApplyPlayerSpawnsToFishNet()
-    {
-        if (playerSpawner == null) return;
-        Transform[] newSpawns = new Transform[4];
         for (int i = 0; i < 4; i++)
         {
-            GameObject spawnPoint = new GameObject($"DynamicSpawn_Player_{i + 1}");
-            spawnPoint.transform.SetParent(this.transform);
-            spawnPoint.transform.position = _playerSpawns[i];
-            newSpawns[i] = spawnPoint.transform;
+            _playerSpawns[i] = mid + _baseDirections[i] * playerOffsetFromCenter;
+            _playerSpawns[i].y = playerSpawnHeight;
         }
-        playerSpawner.Spawns = newSpawns;
     }
 
-    public override void OnStartNetwork()
+    private void SpawnMothers()
     {
-        base.OnStartNetwork();
+        Vector3 mid = gridSystem != null ? gridSystem.MiddlePoint : Vector3.zero;
 
-        // 1. FlowFieldSystem 세팅 및 Target 등록 (모든 클라이언트가 타겟을 공유해야 함)
-        FlowFieldSystem ffs = FindFirstObjectByType<FlowFieldSystem>();
-        if (ffs != null)
+        for (int i = 0; i < 4; i++)
         {
-            ffs.Initialize(4);
-            EnemyMother.ValidTargets.Clear();
-
-            for (int i = 0; i < playerFirewalls.Length; i++)
+            Vector3 finalMotherPos;
+            if (generatedMotherSpawns.Length > i && generatedMotherSpawns[i] != null)
             {
-                if (playerFirewalls[i] != null)
-                {
-                    EnemyMother.ValidTargets.Add(playerFirewalls[i]);
-                }
+                finalMotherPos = generatedMotherSpawns[i].position;
             }
-        }
-
-        // 2. Mother 스폰 (이건 무조건 서버에서만 스폰해야 함!)
-        if (IsServerInitialized)
-        {
-            Vector3 mid = gridSystem != null ? gridSystem.MiddlePoint : Vector3.zero;
-
-            for (int i = 0; i < 4; i++)
+            else
             {
-                Vector3 finalMotherPos;
+                float randomAngle = Random.Range(-motherSpawnAngleVariance, motherSpawnAngleVariance);
+                Vector3 randomDir = Quaternion.Euler(0, randomAngle, 0) * _baseDirections[i];
+                float randomDist = Random.Range(motherMinRadius, motherMaxRadius);
+                finalMotherPos = mid + (randomDir * randomDist);
+            }
 
-                if (generatedMotherSpawns.Length > i && generatedMotherSpawns[i] != null)
+            GameObject mother = Instantiate(enemyMotherPrefab, finalMotherPos, Quaternion.identity);
+
+            if (mother == null) continue;
+
+            if (mother.TryGetComponent(out EnemyMother motherScript))
+            {
+                if (i < playerFirewalls.Length && playerFirewalls[i] != null)
+                    motherScript.dedicatedTarget = playerFirewalls[i];
+
+                if (stairEntrances != null && stairEntrances.Length > 0)
                 {
-                    finalMotherPos = generatedMotherSpawns[i].position;
-                }
-                else
-                {
-                    float randomAngle = Random.Range(-motherSpawnAngleVariance, motherSpawnAngleVariance);
-                    Vector3 randomDir = Quaternion.Euler(0, randomAngle, 0) * _baseDirections[i];
-                    float randomDist = Random.Range(motherMinRadius, motherMaxRadius);
-                    finalMotherPos = mid + (randomDir * randomDist);
-                }
-
-                GameObject mother = Instantiate(enemyMotherPrefab, finalMotherPos, Quaternion.identity);
-
-                if (mother.TryGetComponent(out EnemyMother motherScript))
-                {
-                    if (i < playerFirewalls.Length && playerFirewalls[i] != null)
-                        motherScript.dedicatedTarget = playerFirewalls[i];
-
-                    if (stairEntrances != null && stairEntrances.Length > 0)
+                    motherScript.injectedStairs = new Vector3[stairEntrances.Length];
+                    for (int j = 0; j < stairEntrances.Length; j++)
                     {
-                        motherScript.injectedStairs = new Vector3[stairEntrances.Length];
-                        for (int j = 0; j < stairEntrances.Length; j++)
-                        {
-                            if (stairEntrances[j] != null)
-                                motherScript.injectedStairs[j] = stairEntrances[j].position;
-                        }
+                        if (stairEntrances[j] != null)
+                            motherScript.injectedStairs[j] = stairEntrances[j].position;
                     }
                 }
-                ServerManager.Spawn(mother);
             }
+
+            ServerManager.Spawn(mother);
         }
     }
 
+    private void TeleportPlayers()
+    {
+        int playerIndex = 0;
+        foreach (NetworkConnection conn in ServerManager.Clients.Values)
+        {
+            if (conn.FirstObject == null) continue;
+
+            Vector3 spawnPos = _playerSpawns[playerIndex % 4];
+
+            CharacterController cc = conn.FirstObject.GetComponent<CharacterController>();
+            if (cc != null) cc.enabled = false;
+            conn.FirstObject.transform.position = spawnPos;
+            if (cc != null) cc.enabled = true;
+
+            PlayerController pc = conn.FirstObject.GetComponent<PlayerController>();
+            if (pc != null) pc.TargetTeleport(conn, spawnPos);
+
+            // [수정 6] RegisterTarget 중복 제거
+            // PlayerController.OnStartNetwork()에서 이미 RegisterTarget을 호출하므로 여기서 또 하면 중복 등록됨
+            // EnemyMother.RegisterTarget(conn.FirstObject.transform); ← 제거
+
+            playerIndex++;
+        }
+    }
+
+#if UNITY_EDITOR
     private void OnDrawGizmosSelected()
     {
         if (gridSystem == null) gridSystem = FindFirstObjectByType<GridSystem>();
@@ -145,8 +188,6 @@ public class SpawnTransformHandler : NetworkBehaviour
 
         Gizmos.color = Color.cyan;
         for (int i = 0; i < 4; i++) Gizmos.DrawSphere(_playerSpawns[i], 1f);
-
-        for (int i = 0; i < 4; i++) DrawGizmoArc(mid, _baseDirections[i], motherMinRadius, motherMaxRadius, motherSpawnAngleVariance);
 
         Gizmos.color = Color.magenta;
         for (int i = 0; i < generatedMotherSpawns.Length; i++)
@@ -159,21 +200,6 @@ public class SpawnTransformHandler : NetworkBehaviour
         }
     }
 
-    private void DrawGizmoArc(Vector3 center, Vector3 baseDir, float minRadius, float maxRadius, float angleVariance)
-    {
-        Vector3 leftDir = Quaternion.Euler(0, -angleVariance, 0) * baseDir;
-        Vector3 rightDir = Quaternion.Euler(0, angleVariance, 0) * baseDir;
-
-        Gizmos.color = Color.yellow;
-        Gizmos.DrawLine(center + leftDir * minRadius, center + rightDir * minRadius);
-        Gizmos.color = Color.red;
-        Gizmos.DrawLine(center + leftDir * maxRadius, center + rightDir * maxRadius);
-        Gizmos.color = new Color(1f, 0.5f, 0f, 0.5f);
-        Gizmos.DrawLine(center + leftDir * minRadius, center + leftDir * maxRadius);
-        Gizmos.DrawLine(center + rightDir * minRadius, center + rightDir * maxRadius);
-    }
-
-#if UNITY_EDITOR
     public void GenerateMotherSpawnsInEditor()
     {
         if (gridSystem == null) gridSystem = FindFirstObjectByType<GridSystem>();
@@ -196,8 +222,7 @@ public class SpawnTransformHandler : NetworkBehaviour
 
             GameObject spawnObj = new GameObject($"PreSpawn_Mother_{i + 1}");
             spawnObj.transform.position = spawnPos;
-            spawnObj.transform.SetParent(this.transform);
-
+            // SetParent 없음 — NetworkObject 자식 계층에 넣지 않음
             generatedMotherSpawns[i] = spawnObj.transform;
         }
 
@@ -215,7 +240,7 @@ public class SpawnTransformHandlerEditor : Editor
     {
         DrawDefaultInspector();
         GUILayout.Space(20);
-        if (GUILayout.Button("🎲 마더 스폰 위치 미리 생성하기", GUILayout.Height(40)))
+        if (GUILayout.Button("마더 스폰 위치 미리 생성하기", GUILayout.Height(40)))
         {
             foreach (var selectedTarget in targets)
             {

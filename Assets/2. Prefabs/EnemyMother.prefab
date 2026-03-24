@@ -10,7 +10,7 @@ GameObject:
   m_Component:
   - component: {fileID: 1489666253285189866}
   - component: {fileID: 8646601646737918052}
-  - component: {fileID: 2493228017869009197}
+  - component: {fileID: -2605944741344936375}
   m_Layer: 0
   m_Name: EnemyMother
   m_TagString: Untagged
@@ -46,8 +46,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::EnemyMother
   _componentIndexCache: 0
-  _addedNetworkObject: {fileID: 2493228017869009197}
-  _networkObjectCache: {fileID: 2493228017869009197}
+  _addedNetworkObject: {fileID: -2605944741344936375}
+  _networkObjectCache: {fileID: 0}
   enemyPrefab: {fileID: 2819425462546582236, guid: 247ba04e9624cf24abc857c02ad55d64, type: 3}
   dedicatedTarget: {fileID: 0}
   startDelay: 5
@@ -65,7 +65,7 @@ MonoBehaviour:
   zombieMesh: {fileID: 4300000, guid: c7826500f54f6484ea03bcbb7fdcc781, type: 2}
   zombieMaterial: {fileID: 2100000, guid: cd4fa0b13f269a647b44d3e9a930aa17, type: 2}
   Enemies: []
---- !u!114 &2493228017869009197
+--- !u!114 &-2605944741344936375
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -83,19 +83,18 @@ MonoBehaviour:
   <ComponentIndex>k__BackingField: 0
   <PredictedSpawn>k__BackingField: {fileID: 0}
   <PredictedOwner>k__BackingField: {fileID: 0}
-  NetworkBehaviours:
-  - {fileID: 8646601646737918052}
+  NetworkBehaviours: []
   InitializedParentNetworkBehaviour: {fileID: 0}
   InitializedNestedNetworkObjects: []
   RuntimeParentNetworkBehaviour: {fileID: 0}
   RuntimeChildNetworkBehaviours: []
   _isNetworked: 1
   _isSpawnable: 1
-  _isGlobal: 1
+  _isGlobal: 0
   _initializeOrder: 0
   _preventDespawnOnDisconnect: 0
-  _defaultDespawnType: 1
-  _initializedTimestamp: -8584273497764625349
+  _defaultDespawnType: 0
+  _initializedTimestamp: 0
   NetworkObserver: {fileID: 0}
   _enablePrediction: 0
   _predictionType: 0
@@ -111,12 +110,12 @@ MonoBehaviour:
   _spectatorInterpolation: 2
   _enableTeleport: 0
   _teleportThreshold: 1
-  <PrefabId>k__BackingField: 6
+  <PrefabId>k__BackingField: 65535
   <SpawnableCollectionId>k__BackingField: 0
   <AssetPathHash>k__BackingField: 9352364555424084405
   SceneId: 0
   SerializedTransformProperties:
     Position: {x: 0, y: 0, z: 0}
-    Rotation: {x: 0, y: 0, z: 0, w: 1}
-    Scale: {x: 1, y: 1, z: 1}
-    IsValid: 1
+    Rotation: {x: 0, y: 0, z: 0, w: 0}
+    Scale: {x: 0, y: 0, z: 0}
+    IsValid: 0

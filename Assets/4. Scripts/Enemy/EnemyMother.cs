@@ -32,7 +32,7 @@ public class EnemyMother : NetworkBehaviour
     [HideInInspector]
     public Vector3[] injectedStairs;
 
-    [Header("💡 GPU Instancing 설정")]
+    [Header("GPU Instancing 설정")]
     public Mesh zombieMesh;
     public Material zombieMaterial;
 
@@ -69,10 +69,12 @@ public class EnemyMother : NetworkBehaviour
     {
         if (!ValidTargets.Contains(target)) ValidTargets.Add(target);
     }
+
     public static void UnregisterTarget(Transform target)
     {
         if (ValidTargets.Contains(target)) ValidTargets.Remove(target);
     }
+
     public static Transform GetClosestTarget(Vector3 searchPos)
     {
         Transform closest = null;
@@ -143,10 +145,42 @@ public class EnemyMother : NetworkBehaviour
 
     private void Awake()
     {
-        // 💡 [CPU 소음 완벽 방지] 모니터 주사율에 맞춰 GPU 폭주를 막습니다.
+        // 모니터 주사율에 맞춰 GPU 폭주 방지
         Application.targetFrameRate = 60;
-
         Enemies = new List<Enemy>(maxActiveEnemies);
+    }
+
+    public override void OnStopNetwork()
+    {
+        base.OnStopNetwork();
+        // 네트워크에서 분리될 때 Job 완전 정리
+        _movementJobHandle.Complete();
+        _hashJobHandle.Complete();
+    }
+
+    private void OnDestroy()
+    {
+        _movementJobHandle.Complete();
+        _hashJobHandle.Complete();
+        if (_transformAccessArray.isCreated) _transformAccessArray.Dispose();
+        if (_raycastCommands.IsCreated) _raycastCommands.Dispose();
+        if (_raycastHits.IsCreated) _raycastHits.Dispose();
+        if (_yVelocities.IsCreated) _yVelocities.Dispose();
+        if (_currentPositions.IsCreated) _currentPositions.Dispose();
+        if (_currentRotations.IsCreated) _currentRotations.Dispose();
+        if (_animStates.IsCreated) _animStates.Dispose();
+        if (_targetIndices.IsCreated) _targetIndices.Dispose();
+        if (_activeTargetPositions.IsCreated) _activeTargetPositions.Dispose();
+        if (_spatialGrid.IsCreated) _spatialGrid.Dispose();
+    }
+
+    public override void OnStartNetwork()
+    {
+        base.OnStartNetwork();
+
+        // [수정 1] 씬 전환 후 stale Transform 정리 — null이거나 비활성 오브젝트 제거
+        ValidTargets.RemoveAll(t => t == null || !t.gameObject.activeInHierarchy);
+
         _transformAccessArray = new TransformAccessArray(maxActiveEnemies);
         _raycastCommands = new NativeArray<RaycastCommand>(maxActiveEnemies * 2, Allocator.Persistent);
         _raycastHits = new NativeArray<RaycastHit>(maxActiveEnemies * 2, Allocator.Persistent);
@@ -172,44 +206,26 @@ public class EnemyMother : NetworkBehaviour
             _isWalkingBatches[i] = new float[1023];
             _timeOffsetBatches[i] = new float[1023];
         }
-    }
 
-    private void OnDestroy()
-    {
-        _movementJobHandle.Complete();
-        _hashJobHandle.Complete();
-        if (_transformAccessArray.isCreated) _transformAccessArray.Dispose();
-        if (_raycastCommands.IsCreated) _raycastCommands.Dispose();
-        if (_raycastHits.IsCreated) _raycastHits.Dispose();
-        if (_yVelocities.IsCreated) _yVelocities.Dispose();
-        if (_currentPositions.IsCreated) _currentPositions.Dispose();
-        if (_currentRotations.IsCreated) _currentRotations.Dispose();
-        if (_animStates.IsCreated) _animStates.Dispose();
-        if (_targetIndices.IsCreated) _targetIndices.Dispose();
-        if (_activeTargetPositions.IsCreated) _activeTargetPositions.Dispose();
-        if (_spatialGrid.IsCreated) _spatialGrid.Dispose();
-    }
-
-    public override void OnStartNetwork()
-    {
-        base.OnStartNetwork();
+        // [수정 2] FFS 참조만 가져옴. Initialize는 SpawnTransformHandler에서 이미 호출하므로 중복 호출 안 함.
         _ffs = FindFirstObjectByType<FlowFieldSystem>();
-        if (_ffs != null) _ffs.Initialize(4);
 
-        if (IsServer) StartCoroutine(SpawnWaveRoutine());
+        if (IsServerInitialized) StartCoroutine(SpawnWaveRoutine());
     }
 
     private void Update()
     {
+        // 1. 이전 프레임 Job 완료 대기 → 결과 확정
         _movementJobHandle.Complete();
         _hashJobHandle.Complete();
 
+        // 2. 확정된 결과로 변경 처리 및 렌더링
         ProcessPendingChanges();
-
         DrawZombiesGPU();
 
         if (Enemies.Count == 0) return;
 
+        // 3. 타겟 위치 갱신
         for (int i = 0; i < ValidTargets.Count && i < 4; i++)
         {
             if (ValidTargets[i] != null && ValidTargets[i].gameObject.activeInHierarchy)
@@ -218,9 +234,11 @@ public class EnemyMother : NetworkBehaviour
 
         _spatialGrid.Clear();
 
+        // 4. Transform 복사 Job
         CopyPositionsJob copyJob = new CopyPositionsJob { CurrentPositions = _currentPositions };
         JobHandle copyHandle = copyJob.Schedule(_transformAccessArray);
 
+        // 5. 공간 해시 Job
         HashPositionsJob hashJob = new HashPositionsJob
         {
             Positions = _currentPositions,
@@ -229,25 +247,31 @@ public class EnemyMother : NetworkBehaviour
         };
         _hashJobHandle = hashJob.Schedule(Enemies.Count, 64, copyHandle);
 
+        // 6. 레이캐스트 셋업 Job
         RaycastSetupJob setupJob = new RaycastSetupJob
         {
             Commands = _raycastCommands,
             DownQueryParams = _groundQueryParams
         };
         JobHandle setupHandle = setupJob.Schedule(_transformAccessArray, copyHandle);
-        JobHandle raycastHandle = RaycastCommand.ScheduleBatch(_raycastCommands, _raycastHits, 32, setupHandle);
+
+        // 수정 후 (전체 배열 사용, setupHandle 의존성 올바르게 연결)
+        JobHandle raycastHandle = RaycastCommand.ScheduleBatch(
+            _raycastCommands, _raycastHits, 32, setupHandle);
 
         JobHandle combinedHandle = JobHandle.CombineDependencies(_hashJobHandle, raycastHandle);
 
-        JobHandle ffsHandle = default;
+        // 7. FlowField Job (FFS가 있을 때만)
         if (_ffs != null)
         {
-            ffsHandle = _ffs.ScheduleFlowFieldJobs(default, ValidTargets);
+            JobHandle ffsHandle = _ffs.ScheduleFlowFieldJobs(default, ValidTargets);
             combinedHandle = JobHandle.CombineDependencies(combinedHandle, ffsHandle);
         }
 
-        NativeArray<Vector3> ff0 = default; NativeArray<Vector3> ff1 = default;
-        NativeArray<Vector3> ff2 = default; NativeArray<Vector3> ff3 = default;
+        NativeArray<Vector3> ff0 = default;
+        NativeArray<Vector3> ff1 = default;
+        NativeArray<Vector3> ff2 = default;
+        NativeArray<Vector3> ff3 = default;
 
         if (_ffs != null && _ffs.NativeFlowFields != null)
         {
@@ -257,6 +281,7 @@ public class EnemyMother : NetworkBehaviour
             if (_ffs.NativeFlowFields.Length > 3) ff3 = _ffs.NativeFlowFields[3];
         }
 
+        // 8. 이동 Job — [수정 4] ElapsedTime 전달 추가
         EnemyMovementJob moveJob = new EnemyMovementJob
         {
             ActiveTargetPositions = _activeTargetPositions,
@@ -267,6 +292,7 @@ public class EnemyMother : NetworkBehaviour
             YVelocities = _yVelocities,
             AnimStates = _animStates,
             Rotations = _currentRotations,
+            ElapsedTime = Time.time,        // [수정 4] 누락된 ElapsedTime 전달 — sway 애니메이션 정상 동작
             DeltaTime = Time.deltaTime,
             Speed = globalEnemySpeed,
             RotationSpeed = globalRotationSpeed,
@@ -322,13 +348,22 @@ public class EnemyMother : NetworkBehaviour
     {
         yield return new WaitForSeconds(startDelay);
         int randomSeed = UnityEngine.Random.Range(0, 999999);
+
+        // 서버(호스트 포함)는 여기서 직접 스폰
+        StartCoroutine(SpawnEnemyLocal(randomSeed, enemiesPerSpawn));
+
+        // 클라이언트들에게만 RPC 전송 (RunLocally = false)
         RpcStartSpawnWave(randomSeed, enemiesPerSpawn);
     }
 
-    // 💡 [클라이언트 투명화 완벽 해결] A플랜 전용 안전한 스피커 방송(RPC) 복구 완료!
-    [ObserversRpc(RunLocally = true)]
+    // RunLocally = false → 서버는 위에서 이미 스폰했으므로 재실행 안 함
+    [ObserversRpc(RunLocally = false)]
     private void RpcStartSpawnWave(int seed, int spawnCount)
     {
+        // 클라이언트호스트는 IsServerInitialized = true 이므로 건너뜀
+        // 서버에서 이미 SpawnEnemyLocal을 직접 호출했기 때문
+        if (IsServerInitialized) return;
+
         StartCoroutine(SpawnEnemyLocal(seed, spawnCount));
     }
 
@@ -346,7 +381,9 @@ public class EnemyMother : NetworkBehaviour
 
             if (newEnemyObj.TryGetComponent(out Enemy simpleEnemy))
             {
-                Transform target = dedicatedTarget != null && dedicatedTarget.gameObject.activeInHierarchy ? dedicatedTarget : GetClosestTarget(transform.position);
+                Transform target = dedicatedTarget != null && dedicatedTarget.gameObject.activeInHierarchy
+                    ? dedicatedTarget
+                    : GetClosestTarget(transform.position);
                 simpleEnemy.InitializeEnemy(this, target);
                 AddEnemy(simpleEnemy);
             }
