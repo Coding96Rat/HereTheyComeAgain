@@ -11,6 +11,10 @@ public class HUDController : MonoBehaviour
 
     private PlayerInteractor _targetPlayer;
 
+    // 프롬프트 문자열 캐시 — 내용이 바뀔 때만 TextMeshPro에 쓰도록 GC Alloc 방지
+    private string _cachedPrompt     = string.Empty;
+    private string _cachedDisplayText = string.Empty;
+
     [SerializeField]
     private CanvasGroup _interactPromptCanvaGroup;
 
@@ -33,8 +37,14 @@ public class HUDController : MonoBehaviour
         // 💡 플레이어의 Property를 실시간으로 감시!
         if (_targetPlayer.IsInteractDetected)
         {
-            // 글씨를 업데이트하고 선명하게(Alpha 1) 페이드 인
-            interactPromptText.text = $"[E] {_targetPlayer.CurrentInteractPrompt}";
+            // 프롬프트가 바뀐 경우에만 문자열 재생성 (매 프레임 string 할당 방지)
+            string newPrompt = _targetPlayer.CurrentInteractPrompt;
+            if (newPrompt != _cachedPrompt)
+            {
+                _cachedPrompt      = newPrompt;
+                _cachedDisplayText = $"[E] {newPrompt}";
+            }
+            interactPromptText.text = _cachedDisplayText;
             FadeTo(1f);
         }
         else

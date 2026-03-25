@@ -24,8 +24,6 @@ public struct EnemyMovementJob : IJobParallelForTransform
     [ReadOnly] public float SeparationRadius;
     [ReadOnly] public float SeparationWeight;
     [ReadOnly] public float CellSize;
-    [ReadOnly] public float MaxWeightTolerance;
-
     [ReadOnly] public NativeArray<Vector3> FlowField0;
     [ReadOnly] public NativeArray<Vector3> FlowField1;
     [ReadOnly] public NativeArray<Vector3> FlowField2;
@@ -91,7 +89,6 @@ public struct EnemyMovementJob : IJobParallelForTransform
         float trueGroundY = downHit.colliderEntityId != 0 ? downHit.point.y : -999f;
         float targetGroundY = trueGroundY;
         Vector3 separation = Vector3.zero;
-        float myCarriedWeight = 0f;
         float sepRadiusSqr = SeparationRadius * SeparationRadius;
 
         for (int cx = -1; cx <= 1; cx++)
@@ -121,16 +118,6 @@ public struct EnemyMovementJob : IJobParallelForTransform
                             separation.x += diff.x * pushStrength;
                             separation.z += diff.z * pushStrength;
                         }
-
-                        if (sqrDistXZ < 0.8f)
-                        {
-                            if (otherPos.y > currentPos.y + 0.8f) myCarriedWeight += 1.0f;
-                            else if (otherPos.y < currentPos.y && otherPos.y > currentPos.y - 1.8f)
-                            {
-                                float otherHeadY = otherPos.y + 1.2f;
-                                if (otherHeadY > targetGroundY) targetGroundY = otherHeadY;
-                            }
-                        }
                     } while (SpatialGrid.TryGetNextValue(out otherIdx, ref it));
                 }
             }
@@ -138,14 +125,28 @@ public struct EnemyMovementJob : IJobParallelForTransform
 
         if (separation.sqrMagnitude > 4.0f) separation = separation.normalized * 2.0f;
 
-        bool isCollapsing = myCarriedWeight >= MaxWeightTolerance;
         float currentYVel = YVelocities[index];
         float currentSpeed = (distSqr < 2.0f) ? 0f : Speed;
 
         Vector3 xzVelocity = (desiredDir * currentSpeed) + (separation * SeparationWeight);
-        if (isCollapsing) targetGroundY = trueGroundY;
 
-        if (!isCollapsing && fwdHit.colliderEntityId != 0 && fwdHit.distance < 1.2f)
+        // 탑 쌓기 방지: 타겟 근처(3m 이내)에서 접선 방향 힘을 추가해 적들이 링 형태로 둘러쌈
+        // 분리 벡터의 방향을 기준으로 CW/CCW 중 분리 힘과 맞는 방향을 선택
+        if (distSqr > 0.1f && distSqr < 9.0f)
+        {
+            float dist = math.sqrt(distSqr);
+            Vector3 radial = new Vector3(toTarget.x / dist, 0f, toTarget.z / dist);
+            Vector3 tangentCW  = new Vector3( radial.z, 0f, -radial.x);
+            Vector3 tangentCCW = new Vector3(-radial.z, 0f,  radial.x);
+            float cwDot  = separation.x * tangentCW.x  + separation.z * tangentCW.z;
+            float ccwDot = separation.x * tangentCCW.x + separation.z * tangentCCW.z;
+            Vector3 chosenTangent = (cwDot >= ccwDot) ? tangentCW : tangentCCW;
+            float tangentStrength = math.max(0f, 1f - dist / 3.0f) * Speed * 0.8f;
+            xzVelocity.x += chosenTangent.x * tangentStrength;
+            xzVelocity.z += chosenTangent.z * tangentStrength;
+        }
+
+        if (fwdHit.colliderEntityId != 0 && fwdHit.distance < 1.2f)
         {
             if (fwdHit.normal.y < 0.25f)
             {
@@ -174,7 +175,7 @@ public struct EnemyMovementJob : IJobParallelForTransform
             }
             else if (yDiff < -0.1f) // 내리막 또는 추락
             {
-                currentYVel -= Gravity * (isCollapsing ? 2.5f : 1.0f) * dt;
+                currentYVel -= Gravity * dt;
                 float nextY = currentPos.y + currentYVel * dt;
 
                 // 다음 프레임 위치가 지형보다 낮아지면 지형 높이에 강제 고정

@@ -90,8 +90,11 @@ public class SpawnTransformHandler : NetworkBehaviour
         if (ffs != null)
         {
             ffs.Initialize(4);
-            // 💡 치명적 에러 원흉 삭제! 방화벽은 배열 한계를 터뜨리므로 넣지 않습니다.
-            EnemyMother.ValidTargets.Clear();
+            // ValidTargets.Clear()를 여기서 호출하지 않음.
+            // FishNet 이벤트 순서: OnStartNetwork(PlayerController → RegisterTarget) 이후에
+            // OnLoadEnd(SetupStage)가 실행되므로, Clear()를 호출하면 Host 플레이어 타겟이
+            // 삭제되어 Host에서 좀비가 이동하지 않는 버그 발생.
+            // stale 정리는 EnemyMother.OnStartNetwork()의 RemoveAll이 담당.
         }
 
         SpawnMothers();

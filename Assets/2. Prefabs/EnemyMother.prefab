@@ -47,13 +47,13 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::EnemyMother
   _componentIndexCache: 0
   _addedNetworkObject: {fileID: -2605944741344936375}
-  _networkObjectCache: {fileID: 0}
+  _networkObjectCache: {fileID: -2605944741344936375}
   enemyPrefab: {fileID: 2819425462546582236, guid: 247ba04e9624cf24abc857c02ad55d64, type: 3}
   dedicatedTarget: {fileID: 0}
   startDelay: 5
   spawnInterval: 1
-  enemiesPerSpawn: 100
-  maxActiveEnemies: 100
+  enemiesPerSpawn: 1000
+  maxActiveEnemies: 1000
   spawnRadius: 46.1
   separationRadius: 1.5
   separationWeight: 2
@@ -83,7 +83,8 @@ MonoBehaviour:
   <ComponentIndex>k__BackingField: 0
   <PredictedSpawn>k__BackingField: {fileID: 0}
   <PredictedOwner>k__BackingField: {fileID: 0}
-  NetworkBehaviours: []
+  NetworkBehaviours:
+  - {fileID: 8646601646737918052}
   InitializedParentNetworkBehaviour: {fileID: 0}
   InitializedNestedNetworkObjects: []
   RuntimeParentNetworkBehaviour: {fileID: 0}
@@ -94,7 +95,7 @@ MonoBehaviour:
   _initializeOrder: 0
   _preventDespawnOnDisconnect: 0
   _defaultDespawnType: 0
-  _initializedTimestamp: 0
+  _initializedTimestamp: -8584271928408884812
   NetworkObserver: {fileID: 0}
   _enablePrediction: 0
   _predictionType: 0
@@ -110,12 +111,12 @@ MonoBehaviour:
   _spectatorInterpolation: 2
   _enableTeleport: 0
   _teleportThreshold: 1
-  <PrefabId>k__BackingField: 65535
+  <PrefabId>k__BackingField: 6
   <SpawnableCollectionId>k__BackingField: 0
   <AssetPathHash>k__BackingField: 9352364555424084405
   SceneId: 0
   SerializedTransformProperties:
     Position: {x: 0, y: 0, z: 0}
-    Rotation: {x: 0, y: 0, z: 0, w: 0}
-    Scale: {x: 0, y: 0, z: 0}
-    IsValid: 0
+    Rotation: {x: 0, y: 0, z: 0, w: 1}
+    Scale: {x: 1, y: 1, z: 1}
+    IsValid: 1

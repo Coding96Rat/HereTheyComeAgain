@@ -27,7 +27,6 @@ public class EnemyMother : NetworkBehaviour
     public float globalEnemySpeed = 3f;
     public float globalRotationSpeed = 360f;
     public float cellSize = 2.0f;
-    public float maxWeightTolerance = 3.0f;
 
     [HideInInspector]
     public Vector3[] injectedStairs;
@@ -56,6 +55,11 @@ public class EnemyMother : NetworkBehaviour
 
     private FlowFieldSystem _ffs;
     private NativeParallelMultiHashMap<int, int> _spatialGrid;
+
+    // P2: 렌더링 데이터 빌드용 NativeArray — BuildRenderDataJob이 Worker Thread에서 채움
+    private NativeArray<Matrix4x4> _matricesBuffer;
+    private NativeArray<float>     _isWalkingBuffer;
+    private NativeArray<float>     _timeOffsetBuffer;
 
     // GPU 렌더링 변수
     private MaterialPropertyBlock _mpb;
@@ -104,6 +108,15 @@ public class EnemyMother : NetworkBehaviour
     private void ExecuteAddEnemy(Enemy enemy)
     {
         int newIndex = Enemies.Count;
+
+        // 최종 방어선: 큐 경합으로 인해 NativeArray 한계를 초과하는 경우 차단
+        if (newIndex >= maxActiveEnemies)
+        {
+            enemy.motherListIndex = -1;
+            Destroy(enemy.gameObject);
+            return;
+        }
+
         Enemies.Add(enemy);
         enemy.motherListIndex = newIndex;
 
@@ -172,6 +185,9 @@ public class EnemyMother : NetworkBehaviour
         if (_targetIndices.IsCreated) _targetIndices.Dispose();
         if (_activeTargetPositions.IsCreated) _activeTargetPositions.Dispose();
         if (_spatialGrid.IsCreated) _spatialGrid.Dispose();
+        if (_matricesBuffer.IsCreated)   _matricesBuffer.Dispose();
+        if (_isWalkingBuffer.IsCreated)  _isWalkingBuffer.Dispose();
+        if (_timeOffsetBuffer.IsCreated) _timeOffsetBuffer.Dispose();
     }
 
     public override void OnStartNetwork()
@@ -179,7 +195,10 @@ public class EnemyMother : NetworkBehaviour
         base.OnStartNetwork();
 
         // [수정 1] 씬 전환 후 stale Transform 정리 — null이거나 비활성 오브젝트 제거
-        ValidTargets.RemoveAll(t => t == null || !t.gameObject.activeInHierarchy);
+        // P5: RemoveAll(람다) → 수동 루프로 교체하여 람다 캡처 GC Alloc 제거
+        for (int i = ValidTargets.Count - 1; i >= 0; i--)
+            if (ValidTargets[i] == null || !ValidTargets[i].gameObject.activeInHierarchy)
+                ValidTargets.RemoveAt(i);
 
         _transformAccessArray = new TransformAccessArray(maxActiveEnemies);
         _raycastCommands = new NativeArray<RaycastCommand>(maxActiveEnemies * 2, Allocator.Persistent);
@@ -191,6 +210,11 @@ public class EnemyMother : NetworkBehaviour
         _spatialGrid = new NativeParallelMultiHashMap<int, int>(maxActiveEnemies, Allocator.Persistent);
         _targetIndices = new NativeArray<int>(maxActiveEnemies, Allocator.Persistent);
         _activeTargetPositions = new NativeArray<Vector3>(4, Allocator.Persistent);
+
+        // P2: 렌더링 빌드 버퍼 (Worker Thread에서 TRS 계산 결과를 받는 저장소)
+        _matricesBuffer  = new NativeArray<Matrix4x4>(maxActiveEnemies, Allocator.Persistent);
+        _isWalkingBuffer = new NativeArray<float>(maxActiveEnemies, Allocator.Persistent);
+        _timeOffsetBuffer = new NativeArray<float>(maxActiveEnemies, Allocator.Persistent);
 
         _groundQueryParams = new QueryParameters(LayerMask.GetMask("Ground"), false, QueryTriggerInteraction.Ignore, false);
         _mpb = new MaterialPropertyBlock();
@@ -219,8 +243,23 @@ public class EnemyMother : NetworkBehaviour
         _movementJobHandle.Complete();
         _hashJobHandle.Complete();
 
-        // 2. 확정된 결과로 변경 처리 및 렌더링
+        // 2. 확정된 결과로 변경 처리
         ProcessPendingChanges();
+
+        // P2: TRS 행렬 + 애니메이션 데이터를 Worker Thread에서 병렬 계산
+        // (기존 Main Thread에서 Matrix4x4.TRS × N 반복 → Worker Thread 병렬화)
+        if (Enemies.Count > 0)
+        {
+            new BuildRenderDataJob
+            {
+                Positions       = _currentPositions,
+                Rotations       = _currentRotations,
+                AnimStates      = _animStates,
+                Matrices        = _matricesBuffer,
+                IsWalkingValues = _isWalkingBuffer,
+                TimeOffsets     = _timeOffsetBuffer
+            }.Schedule(Enemies.Count, 64).Complete();
+        }
         DrawZombiesGPU();
 
         if (Enemies.Count == 0) return;
@@ -247,19 +286,25 @@ public class EnemyMother : NetworkBehaviour
         };
         _hashJobHandle = hashJob.Schedule(Enemies.Count, 64, copyHandle);
 
-        // 6. 레이캐스트 셋업 Job
-        RaycastSetupJob setupJob = new RaycastSetupJob
+        // 6. P3: 격 프레임 레이캐스트 — 짝수 프레임만 실행 (매 프레임 8000회 → 격 프레임 8000회)
+        // 홀수 프레임은 직전 프레임의 _raycastHits를 그대로 재사용 (1프레임 지연, 60fps에서 무시 가능)
+        JobHandle combinedHandle = _hashJobHandle;
+        if (Time.frameCount % 2 == 0)
         {
-            Commands = _raycastCommands,
-            DownQueryParams = _groundQueryParams
-        };
-        JobHandle setupHandle = setupJob.Schedule(_transformAccessArray, copyHandle);
-
-        // 수정 후 (전체 배열 사용, setupHandle 의존성 올바르게 연결)
-        JobHandle raycastHandle = RaycastCommand.ScheduleBatch(
-            _raycastCommands, _raycastHits, 32, setupHandle);
-
-        JobHandle combinedHandle = JobHandle.CombineDependencies(_hashJobHandle, raycastHandle);
+            RaycastSetupJob setupJob = new RaycastSetupJob
+            {
+                Commands        = _raycastCommands,
+                DownQueryParams = _groundQueryParams
+            };
+            // 활성 적 수만큼만 Raycast 처리 — 전체 배열(최대 8000) 대신 실제 사용 슬라이스만 전달
+            int activeRayCount      = Enemies.Count * 2;
+            JobHandle setupHandle   = setupJob.Schedule(_transformAccessArray, copyHandle);
+            JobHandle raycastHandle = RaycastCommand.ScheduleBatch(
+                _raycastCommands.GetSubArray(0, activeRayCount),
+                _raycastHits.GetSubArray(0, activeRayCount),
+                32, setupHandle);
+            combinedHandle = JobHandle.CombineDependencies(_hashJobHandle, raycastHandle);
+        }
 
         // 7. FlowField Job (FFS가 있을 때만)
         if (_ffs != null)
@@ -300,7 +345,6 @@ public class EnemyMother : NetworkBehaviour
             SeparationRadius = separationRadius,
             SeparationWeight = separationWeight,
             CellSize = cellSize,
-            MaxWeightTolerance = maxWeightTolerance,
             FlowField0 = ff0,
             FlowField1 = ff1,
             FlowField2 = ff2,
@@ -327,17 +371,16 @@ public class EnemyMother : NetworkBehaviour
 
         for (int b = 0; b < batches; b++)
         {
-            int batchCount = Mathf.Min(1023, count - (b * 1023));
+            int start      = b * 1023;
+            int batchCount = Mathf.Min(1023, count - start);
 
-            for (int i = 0; i < batchCount; i++)
-            {
-                int globalIdx = b * 1023 + i;
-                _matrixBatches[b][i] = Matrix4x4.TRS(_currentPositions[globalIdx], _currentRotations[globalIdx], Vector3.one);
-                _isWalkingBatches[b][i] = (_animStates[globalIdx] == 1) ? 1f : 0f;
-                _timeOffsetBatches[b][i] = (globalIdx * 0.123f) % 2f;
-            }
+            // P2: BuildRenderDataJob이 채운 NativeArray → managed array 고속 복사
+            // CopyTo(T[])는 길이 완전 일치 필요 → 명시적 length를 지정하는 정적 Copy 오버로드 사용
+            NativeArray<Matrix4x4>.Copy(_matricesBuffer,  start, _matrixBatches[b],    0, batchCount);
+            NativeArray<float>.Copy    (_isWalkingBuffer, start, _isWalkingBatches[b], 0, batchCount);
+            NativeArray<float>.Copy    (_timeOffsetBuffer,start, _timeOffsetBatches[b],0, batchCount);
 
-            _mpb.SetFloatArray(_isWalkingHash, _isWalkingBatches[b]);
+            _mpb.SetFloatArray(_isWalkingHash,  _isWalkingBatches[b]);
             _mpb.SetFloatArray(_timeOffsetHash, _timeOffsetBatches[b]);
 
             Graphics.DrawMeshInstanced(zombieMesh, 0, zombieMaterial, _matrixBatches[b], batchCount, _mpb);
@@ -347,13 +390,24 @@ public class EnemyMother : NetworkBehaviour
     private IEnumerator SpawnWaveRoutine()
     {
         yield return new WaitForSeconds(startDelay);
-        int randomSeed = UnityEngine.Random.Range(0, 999999);
 
-        // 서버(호스트 포함)는 여기서 직접 스폰
-        StartCoroutine(SpawnEnemyLocal(randomSeed, enemiesPerSpawn));
+        // WaitForSeconds를 매 루프마다 new 하지 않도록 캐시 (GC Alloc 방지)
+        WaitForSeconds interval = new WaitForSeconds(spawnInterval);
 
-        // 클라이언트들에게만 RPC 전송 (RunLocally = false)
-        RpcStartSpawnWave(randomSeed, enemiesPerSpawn);
+        // maxActiveEnemies에 도달할 때까지 spawnInterval마다 enemiesPerSpawn씩 지속 소환
+        // _pendingAdds.Count 포함: 아직 미처리된 대기 적까지 합산해야 실제 한계 초과를 방지
+        while (Enemies.Count + _pendingAdds.Count < maxActiveEnemies)
+        {
+            int randomSeed = UnityEngine.Random.Range(0, 999999);
+
+            // 서버(호스트 포함)는 여기서 직접 스폰
+            StartCoroutine(SpawnEnemyLocal(randomSeed, enemiesPerSpawn));
+
+            // 클라이언트들에게만 RPC 전송 (RunLocally = false)
+            RpcStartSpawnWave(randomSeed, enemiesPerSpawn);
+
+            yield return interval;
+        }
     }
 
     // RunLocally = false → 서버는 위에서 이미 스폰했으므로 재실행 안 함
@@ -374,7 +428,8 @@ public class EnemyMother : NetworkBehaviour
 
         for (int i = 0; i < spawnCount; i++)
         {
-            if (Enemies.Count >= maxActiveEnemies) break;
+            // _pendingAdds까지 합산해 한계 초과 여부 판단 (Enemies.Count만 보면 큐 경합 발생)
+            if (Enemies.Count + _pendingAdds.Count >= maxActiveEnemies) break;
 
             Vector3 spawnPos = GetSpawnPointFromMom();
             GameObject newEnemyObj = Instantiate(enemyPrefab, spawnPos, Quaternion.identity);

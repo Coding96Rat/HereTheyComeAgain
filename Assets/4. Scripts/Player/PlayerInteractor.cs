@@ -20,6 +20,10 @@ public class PlayerInteractor : NetworkBehaviour
 
     private HUDController hudController;
 
+    // 씬 전환 후 HUD 재탐색용 — FindFirstObjectByType을 매 프레임 호출하지 않도록 쿨다운 관리
+    private float _hudRetryTimer = 0f;
+    private const float HUD_RETRY_INTERVAL = 1f;
+
     public override void OnStartNetwork()
     {
         base.OnStartNetwork();
@@ -54,12 +58,16 @@ public class PlayerInteractor : NetworkBehaviour
     private void CheckInteractHover()
     {
 
-        // 💡 [핵심 추가] 씬이 넘어가서 HUD가 파괴되었다면 새로 배치된 녀석을 다시 찾습니다!
+        // 씬 전환 후 HUD가 파괴된 경우 재탐색 — 단, 1초 간격으로만 시도 (매 프레임 탐색 방지)
         if (hudController == null)
         {
+            _hudRetryTimer += Time.deltaTime;
+            if (_hudRetryTimer < HUD_RETRY_INTERVAL) return;
+            _hudRetryTimer = 0f;
+
             hudController = Object.FindFirstObjectByType<HUDController>();
             if (hudController != null) hudController.SetPlayer(this);
-            else return; // 여전히 없으면(HUD를 씬에 안 뒀으면) 상호작용 UI 로직 건너뜀
+            else return;
         }
 
         Ray ray = new Ray(cameraTransform.position, cameraTransform.forward);

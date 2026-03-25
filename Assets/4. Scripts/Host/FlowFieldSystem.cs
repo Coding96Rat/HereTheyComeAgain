@@ -38,6 +38,9 @@ public class FlowFieldSystem : MonoBehaviour
     private int _lastScheduledFrame = -1;
     private JobHandle _combinedFfsHandleThisFrame;
 
+    // P1/P6: 플레이어별 마지막 FlowField 계산 셀 추적 — 같은 셀이면 BFS 생략
+    private int2[] _lastPlayerCells;
+
     // 💡 [에러 원천 차단] 모든 Mother의 읽기 작업을 추적하는 마스터 핸들
     private JobHandle _globalReadersHandle;
 
@@ -93,8 +96,11 @@ public class FlowFieldSystem : MonoBehaviour
 
         _perPlayerHandles = new JobHandle[maxPlayers];
 
+        // P1/P6: 셀 추적 배열 초기화 — int.MinValue는 "아직 계산 안 함" 센티넬 값
+        _lastPlayerCells = new int2[maxPlayers];
         for (int i = 0; i < maxPlayers; i++)
         {
+            _lastPlayerCells[i] = new int2(int.MinValue, int.MinValue);
             _integrationFields[i] = new NativeArray<int>(totalCells, Allocator.Persistent);
             NativeFlowFields[i] = new NativeArray<Vector3>(totalCells, Allocator.Persistent);
         }
@@ -155,6 +161,11 @@ public class FlowFieldSystem : MonoBehaviour
                 _costField[flatIndex] = newCost;
             }
         }
+
+        // 장애물 변경 → 모든 플레이어 셀 캐시 무효화 (다음 프레임에 FlowField 강제 재계산)
+        if (_lastPlayerCells != null)
+            for (int i = 0; i < _lastPlayerCells.Length; i++)
+                _lastPlayerCells[i] = new int2(int.MinValue, int.MinValue);
     }
 
     public JobHandle ScheduleFlowFieldJobs(JobHandle dependency, List<Transform> targetPlayers)
@@ -178,11 +189,18 @@ public class FlowFieldSystem : MonoBehaviour
         {
             if (targetPlayers[i] == null || !targetPlayers[i].gameObject.activeInHierarchy) continue;
 
-            if (_perPlayerHandles != null) _perPlayerHandles[i].Complete();
-
             Vector3 pPos = targetPlayers[i].position;
             int pX = Mathf.FloorToInt((pPos.x - _bottomLeft.x) / aiCellSize);
             int pZ = Mathf.FloorToInt((pPos.z - _bottomLeft.z) / aiCellSize);
+
+            // P1/P6: 플레이어가 같은 FlowField 셀 안에 있으면 BFS 재계산 생략
+            // — IntegrationFieldJob(단일 스레드 BFS)이 매 프레임 불필요하게 실행되는 병목 제거
+            if (_lastPlayerCells[i].x == pX && _lastPlayerCells[i].y == pZ)
+                continue;
+
+            _lastPlayerCells[i] = new int2(pX, pZ);
+
+            if (_perPlayerHandles != null) _perPlayerHandles[i].Complete();
 
             IntegrationFieldJob intJob = new IntegrationFieldJob
             {
