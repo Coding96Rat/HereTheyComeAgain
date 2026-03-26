@@ -1,5 +1,6 @@
 using UnityEngine;
 using FishNet.Object;
+using FishNet.Managing.Scened;
 
 public class PlayerInteractor : NetworkBehaviour
 {
@@ -12,8 +13,13 @@ public class PlayerInteractor : NetworkBehaviour
 
     [Header("Shooting (좌클릭)")]
     public bool isArmed = false;
-    public float currentWeaponRange = 50f;
+    public float currentWeaponDamage = 25f;
+    public float headshotMultiplier = 3f;
+    public float fireRate = 10f;        // 초당 발사 횟수
     public LayerMask shootableLayer;
+    public LayerMask blockingLayer;
+
+    private float _nextFireTime = 0f;
 
     public bool IsInteractDetected { get; private set; }
     public string CurrentInteractPrompt { get; private set; }
@@ -41,6 +47,41 @@ public class PlayerInteractor : NetworkBehaviour
                 Debug.LogWarning("씬에 HUDController가 없습니다!");
             }
         }
+
+        if (base.Owner.IsLocalClient)
+        {
+            // 이미 StageScene에 있는 상태로 네트워크가 시작된 경우 즉시 무장
+            if (UnityEngine.SceneManagement.SceneManager.GetActiveScene().name == "StageScene")
+            {
+                isArmed = true;
+            }
+            else
+            {
+                base.SceneManager.OnLoadEnd += OnSceneLoadEnd;
+            }
+        }
+    }
+
+    public override void OnStopNetwork()
+    {
+        base.OnStopNetwork();
+
+        // OnStopNetwork 시점엔 소유권 정보가 이미 해제될 수 있으므로 IsOwner 대신 무조건 해제
+        if (base.SceneManager != null)
+            base.SceneManager.OnLoadEnd -= OnSceneLoadEnd;
+    }
+
+    private void OnSceneLoadEnd(SceneLoadEndEventArgs args)
+    {
+        foreach (UnityEngine.SceneManagement.Scene scene in args.LoadedScenes)
+        {
+            if (scene.name == "StageScene")
+            {
+                isArmed = true;
+                base.SceneManager.OnLoadEnd -= OnSceneLoadEnd;
+                return;
+            }
+        }
     }
 
     void Update()
@@ -49,8 +90,9 @@ public class PlayerInteractor : NetworkBehaviour
 
         CheckInteractHover();
 
-        if (isArmed && Input.GetMouseButtonDown(0))
+        if (isArmed && Input.GetMouseButton(0) && Time.time >= _nextFireTime)
         {
+            _nextFireTime = Time.time + 1f / fireRate;
             TryShoot();
         }
     }
@@ -99,12 +141,39 @@ public class PlayerInteractor : NetworkBehaviour
     {
         Ray ray = new Ray(cameraTransform.position, cameraTransform.forward);
 
-        // 💡 사격용 디버그 레이저 그리기 (빨간색)
-        Debug.DrawRay(ray.origin, ray.direction * currentWeaponRange, Color.red, 2f);
+        // 지형/구조물 차단 거리 계산 (Infinity 사거리이므로 관통 방지를 위해 먼저 검사)
+        float blockDist = Mathf.Infinity;
+        if (Physics.Raycast(ray, out RaycastHit blockHit, Mathf.Infinity, blockingLayer))
+            blockDist = blockHit.distance;
 
-        if (Physics.Raycast(ray, out RaycastHit hit, currentWeaponRange, shootableLayer))
-        {
+        // 💡 사격용 디버그 레이저 그리기 (빨간색) — Infinity 대신 500f 사용 (DrawRay에 Infinity 불가)
+        Debug.DrawRay(ray.origin, ray.direction * (float.IsInfinity(blockDist) ? 500f : blockDist), Color.red, 2f);
+
+        // 환경/벽 등 일반 Physics 오브젝트 명중 로그
+        if (Physics.Raycast(ray, out RaycastHit hit, blockDist, shootableLayer))
             Debug.Log($"[{hit.collider.name}] 명중!");
+
+        // 적은 CapsuleCollider가 없으므로 Ray-Capsule 수학 검사로 처리
+        // blockDist로 캡을 걸어 지형/구조물 뒤 적은 판정 제외
+        Enemy closestEnemy = null;
+        float closestDist = blockDist;
+        bool isHeadshot = false;
+        foreach (EnemyMother mother in EnemyMother.AllMothers)
+        {
+            Enemy candidate = mother.GetEnemyHitByRay(ray, closestDist, out float t, out bool headshot);
+            if (candidate != null && t < closestDist)
+            {
+                closestDist = t;
+                closestEnemy = candidate;
+                isHeadshot = headshot;
+            }
+        }
+
+        if (closestEnemy != null)
+        {
+            float damage = isHeadshot ? currentWeaponDamage * headshotMultiplier : currentWeaponDamage;
+            Debug.Log(isHeadshot ? $"[HEADSHOT] {damage} 데미지" : $"[Hit] {damage} 데미지");
+            closestEnemy.TakeDamage(damage);
         }
     }
 

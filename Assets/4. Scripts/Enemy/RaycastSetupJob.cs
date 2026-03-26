@@ -20,7 +20,7 @@ public struct RaycastSetupJob : IJobParallelForTransform
         // 좀비가 맵 아래로 약간 파고들었더라도, 15m 위에서 쏘면 지형 위에서 쏘는 판정이 되어 다시 지형 위로 끌어올려집니다.
         Vector3 downOrigin = pos;
         downOrigin.y += 15.0f;
-        Commands[index * 2] = new RaycastCommand(downOrigin, Vector3.down, DownQueryParams, 50.0f);
+        Commands[index * 2] = new RaycastCommand(downOrigin, Vector3.down, DownQueryParams, 25.0f);
 
         Vector3 forwardOrigin = pos;
         forwardOrigin.y += 0.3f;

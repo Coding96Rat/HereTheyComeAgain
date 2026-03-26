@@ -7,11 +7,30 @@ public class FPSDISPLAY : MonoBehaviour
 
     // 0.5초 간격으로 평균 FPS 표시 — 순간값보다 안정적이고 매 프레임 문자열 할당 제거
     private const float UPDATE_INTERVAL = 0.5f;
-    private int   _frameCount   = 0;
-    private float _elapsedTime  = 0f;
+    private int   _frameCount  = 0;
+    private float _elapsedTime = 0f;
+    private bool  _visible     = false;
+
+    private void Awake()
+    {
+        // 씬 전환(LobbyScene → StageScene) 후에도 유지
+        DontDestroyOnLoad(gameObject);
+
+        if (fpsText != null)
+            fpsText.gameObject.SetActive(false);
+    }
 
     void Update()
     {
+        if (Input.GetKeyDown(KeyCode.F11))
+        {
+            _visible = !_visible;
+            if (fpsText != null)
+                fpsText.gameObject.SetActive(_visible);
+        }
+
+        if (!_visible) return;
+
         _frameCount++;
         _elapsedTime += Time.unscaledDeltaTime;
 

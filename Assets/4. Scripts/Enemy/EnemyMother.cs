@@ -11,6 +11,7 @@ public class EnemyMother : NetworkBehaviour
 {
     public GameObject enemyPrefab;
     public static List<Transform> ValidTargets = new List<Transform>();
+    public static readonly List<EnemyMother> AllMothers = new List<EnemyMother>();
 
     public Transform dedicatedTarget;
 
@@ -24,20 +25,20 @@ public class EnemyMother : NetworkBehaviour
     [Header("물리 설정")]
     public float separationRadius = 1.5f;
     public float separationWeight = 2.0f;
-    public float globalEnemySpeed = 3f;
     public float globalRotationSpeed = 360f;
     public float cellSize = 2.0f;
 
     [HideInInspector]
     public Vector3[] injectedStairs;
 
-    [Header("GPU Instancing 설정")]
-    public Mesh zombieMesh;
-    public Material zombieMaterial;
+    // GPU Instancing용 메시/머티리얼 — enemyPrefab의 EnemyDataSO에서 자동 캐싱
+    private Mesh _enemyMesh;
+    private Material _enemyMaterial;
 
     public List<Enemy> Enemies;
     private Queue<Enemy> _pendingAdds = new Queue<Enemy>();
     private Queue<Enemy> _pendingRemoves = new Queue<Enemy>();
+    private Queue<Enemy> _pool = new Queue<Enemy>();
 
     private TransformAccessArray _transformAccessArray;
     private NativeArray<Vector3> _currentPositions;
@@ -52,6 +53,7 @@ public class EnemyMother : NetworkBehaviour
 
     private NativeArray<int> _targetIndices;
     private NativeArray<Vector3> _activeTargetPositions;
+    private NativeArray<float> _speeds;
 
     private FlowFieldSystem _ffs;
     private NativeParallelMultiHashMap<int, int> _spatialGrid;
@@ -99,6 +101,28 @@ public class EnemyMother : NetworkBehaviour
     public void AddEnemy(Enemy enemy) { _pendingAdds.Enqueue(enemy); }
     public void RemoveEnemy(Enemy enemy) { if (enemy.motherListIndex != -1) _pendingRemoves.Enqueue(enemy); }
 
+    // 적이 사망했을 때 호출 — Job 배열에서 제거 후 비활성화하여 풀에 반환
+    public void ReturnToPool(Enemy enemy)
+    {
+        RemoveEnemy(enemy);                  // 다음 ProcessPendingChanges에서 Job 배열 정리
+        enemy.gameObject.SetActive(false);   // 즉시 비활성화 (렌더링·이동 제외)
+        _pool.Enqueue(enemy);
+    }
+
+    // 풀에 재사용 가능한 적이 있으면 꺼내고, 없으면 새로 생성
+    private Enemy GetOrCreateEnemy(Vector3 spawnPos)
+    {
+        if (_pool.Count > 0)
+        {
+            Enemy pooled = _pool.Dequeue();
+            pooled.transform.position = spawnPos;
+            pooled.gameObject.SetActive(true);
+            return pooled;
+        }
+        GameObject obj = Instantiate(enemyPrefab, spawnPos, Quaternion.identity);
+        return obj.TryGetComponent(out Enemy e) ? e : null;
+    }
+
     private void ProcessPendingChanges()
     {
         while (_pendingRemoves.Count > 0) ExecuteRemoveEnemy(_pendingRemoves.Dequeue());
@@ -109,11 +133,12 @@ public class EnemyMother : NetworkBehaviour
     {
         int newIndex = Enemies.Count;
 
-        // 최종 방어선: 큐 경합으로 인해 NativeArray 한계를 초과하는 경우 차단
+        // 최종 방어선: 큐 경합으로 인해 NativeArray 한계를 초과하는 경우 Pool로 반환
         if (newIndex >= maxActiveEnemies)
         {
             enemy.motherListIndex = -1;
-            Destroy(enemy.gameObject);
+            enemy.gameObject.SetActive(false);
+            _pool.Enqueue(enemy);
             return;
         }
 
@@ -124,7 +149,9 @@ public class EnemyMother : NetworkBehaviour
         _targetIndices[newIndex] = enemy.GetTargetIndex();
         _yVelocities[newIndex] = 0f;
         _animStates[newIndex] = 0;
+        _currentPositions[newIndex] = enemy.transform.position; // 첫 프레임 렌더링 위치 초기화
         _currentRotations[newIndex] = enemy.transform.rotation;
+        _speeds[newIndex] = enemy.speed;
     }
 
     private void ExecuteRemoveEnemy(Enemy enemy)
@@ -152,20 +179,125 @@ public class EnemyMother : NetworkBehaviour
             _animStates[removeIndex] = _animStates[lastIndex];
             _currentPositions[removeIndex] = _currentPositions[lastIndex];
             _currentRotations[removeIndex] = _currentRotations[lastIndex];
+            _speeds[removeIndex] = _speeds[lastIndex];
         }
         enemy.motherListIndex = -1;
     }
 
     private void Awake()
     {
-        // 모니터 주사율에 맞춰 GPU 폭주 방지
-        Application.targetFrameRate = 60;
         Enemies = new List<Enemy>(maxActiveEnemies);
+    }
+
+    public Enemy GetEnemyHitByRay(Ray ray, float maxRange, out float hitDist, out bool isHeadshot)
+    {
+        Enemy closestEnemy = null;
+        float closestT = maxRange;
+        isHeadshot = false;
+
+        for (int i = 0; i < Enemies.Count; i++)
+        {
+            Enemy enemy  = Enemies[i];
+            float radius = enemy.hitRadius;
+
+            // 1차 컬링: Ray 방향 기준 투영 거리로 후방/사거리 초과 적 조기 제외
+            Vector3 center  = enemy.transform.position + enemy.hitCenterOffset;
+            Vector3 toEnemy = center - ray.origin;
+            float along = Vector3.Dot(toEnemy, ray.direction);
+            if (along < -radius || along > closestT + radius) continue;
+
+            // 2차 컬링: 몸통 + 머리를 모두 포함하는 경계 반경으로 판정
+            // 머리 구체가 몸통 중심에서 떨어져 있으므로, 그 거리를 컬링 반경에 포함해야 함
+            float perpSqr = toEnemy.sqrMagnitude - along * along;
+            float cullRadius = Mathf.Max(radius * 3f, enemy.hitHeadOffsetDist + enemy.hitHeadRadius);
+            if (perpSqr > cullRadius * cullRadius) continue;
+
+            // 머리 구체 검사 (Body보다 먼저 — 겹치는 경우 Head 우선)
+            Vector3 headCenter = enemy.transform.position + enemy.hitHeadOffset;
+            float tHead = RaySphere(ray.origin, ray.direction, headCenter, enemy.hitHeadRadius);
+            if (tHead >= 0f && tHead < closestT)
+            {
+                closestT = tHead;
+                closestEnemy = enemy;
+                isHeadshot = true;
+                continue;
+            }
+
+            // Body 캡슐 검사
+            float halfExtent = Mathf.Max(0f, enemy.hitHeight * 0.5f - radius);
+            Vector3 capBottom = center - new Vector3(0f, halfExtent, 0f);
+            Vector3 capTop    = center + new Vector3(0f, halfExtent, 0f);
+
+            float t = RayCapsule(ray.origin, ray.direction, capBottom, capTop, radius);
+            if (t >= 0f && t < closestT)
+            {
+                closestT = t;
+                closestEnemy = enemy;
+                isHeadshot = false;
+            }
+        }
+
+        hitDist = closestT;
+        return closestEnemy;
+    }
+
+    // Ray-Sphere 교차 공식 (헤드샷 판정용)
+    // 반환값: 교차 거리(t >= 0), 미교차 시 -1
+    private static float RaySphere(Vector3 ro, Vector3 rd, Vector3 center, float r)
+    {
+        Vector3 oc = ro - center;
+        float b = Vector3.Dot(rd, oc);
+        float c = Vector3.Dot(oc, oc) - r * r;
+        float h = b * b - c;
+        if (h < 0f) return -1f;
+        float t = -b - Mathf.Sqrt(h);
+        return t >= 0f ? t : -1f;
+    }
+
+    // Inigo Quilez의 Ray-Capsule 교차 공식
+    // 반환값: 교차 거리(t >= 0), 미교차 시 -1
+    private static float RayCapsule(Vector3 ro, Vector3 rd, Vector3 pa, Vector3 pb, float r)
+    {
+        Vector3 ba = pb - pa;
+        Vector3 oa = ro - pa;
+
+        float baba = Vector3.Dot(ba, ba);
+        float bard = Vector3.Dot(ba, rd);
+        float baoa = Vector3.Dot(ba, oa);
+        float rdoa = Vector3.Dot(rd, oa);
+        float oaoa = Vector3.Dot(oa, oa);
+
+        float a = baba - bard * bard;
+        float b = baba * rdoa - baoa * bard;
+        float c = baba * oaoa - baoa * baoa - r * r * baba;
+        float h = b * b - a * c;
+
+        if (h >= 0f && a > 1e-6f)
+        {
+            float t = (-b - Mathf.Sqrt(h)) / a;
+            float y = baoa + t * bard;
+
+            // 원통 몸체 적중
+            if (y > 0f && y < baba && t >= 0f) return t;
+
+            // 구형 캡 적중 (위/아래)
+            Vector3 oc = y <= 0f ? oa : ro - pb;
+            b = Vector3.Dot(rd, oc);
+            c = Vector3.Dot(oc, oc) - r * r;
+            h = b * b - c;
+            if (h > 0f)
+            {
+                float t2 = -b - Mathf.Sqrt(h);
+                if (t2 >= 0f) return t2;
+            }
+        }
+        return -1f;
     }
 
     public override void OnStopNetwork()
     {
         base.OnStopNetwork();
+        AllMothers.Remove(this);
         // 네트워크에서 분리될 때 Job 완전 정리
         _movementJobHandle.Complete();
         _hashJobHandle.Complete();
@@ -184,6 +316,7 @@ public class EnemyMother : NetworkBehaviour
         if (_animStates.IsCreated) _animStates.Dispose();
         if (_targetIndices.IsCreated) _targetIndices.Dispose();
         if (_activeTargetPositions.IsCreated) _activeTargetPositions.Dispose();
+        if (_speeds.IsCreated) _speeds.Dispose();
         if (_spatialGrid.IsCreated) _spatialGrid.Dispose();
         if (_matricesBuffer.IsCreated)   _matricesBuffer.Dispose();
         if (_isWalkingBuffer.IsCreated)  _isWalkingBuffer.Dispose();
@@ -193,6 +326,7 @@ public class EnemyMother : NetworkBehaviour
     public override void OnStartNetwork()
     {
         base.OnStartNetwork();
+        AllMothers.Add(this);
 
         // [수정 1] 씬 전환 후 stale Transform 정리 — null이거나 비활성 오브젝트 제거
         // P5: RemoveAll(람다) → 수동 루프로 교체하여 람다 캡처 GC Alloc 제거
@@ -210,11 +344,22 @@ public class EnemyMother : NetworkBehaviour
         _spatialGrid = new NativeParallelMultiHashMap<int, int>(maxActiveEnemies, Allocator.Persistent);
         _targetIndices = new NativeArray<int>(maxActiveEnemies, Allocator.Persistent);
         _activeTargetPositions = new NativeArray<Vector3>(4, Allocator.Persistent);
+        _speeds = new NativeArray<float>(maxActiveEnemies, Allocator.Persistent);
 
         // P2: 렌더링 빌드 버퍼 (Worker Thread에서 TRS 계산 결과를 받는 저장소)
         _matricesBuffer  = new NativeArray<Matrix4x4>(maxActiveEnemies, Allocator.Persistent);
         _isWalkingBuffer = new NativeArray<float>(maxActiveEnemies, Allocator.Persistent);
         _timeOffsetBuffer = new NativeArray<float>(maxActiveEnemies, Allocator.Persistent);
+
+        if (enemyPrefab != null && enemyPrefab.TryGetComponent(out Enemy prefabEnemy) && prefabEnemy.data != null)
+        {
+            _enemyMesh     = prefabEnemy.data.mesh;
+            _enemyMaterial = prefabEnemy.data.material;
+        }
+        else
+        {
+            Debug.LogWarning($"[EnemyMother] {name}: enemyPrefab에 Enemy 컴포넌트 또는 EnemyDataSO가 없습니다.");
+        }
 
         _groundQueryParams = new QueryParameters(LayerMask.GetMask("Ground"), false, QueryTriggerInteraction.Ignore, false);
         _mpb = new MaterialPropertyBlock();
@@ -339,7 +484,7 @@ public class EnemyMother : NetworkBehaviour
             Rotations = _currentRotations,
             ElapsedTime = Time.time,        // [수정 4] 누락된 ElapsedTime 전달 — sway 애니메이션 정상 동작
             DeltaTime = Time.deltaTime,
-            Speed = globalEnemySpeed,
+            Speeds = _speeds,
             RotationSpeed = globalRotationSpeed,
             Gravity = 9.81f,
             SeparationRadius = separationRadius,
@@ -365,7 +510,7 @@ public class EnemyMother : NetworkBehaviour
     private void DrawZombiesGPU()
     {
         int count = Enemies.Count;
-        if (count == 0 || zombieMesh == null || zombieMaterial == null) return;
+        if (count == 0 || _enemyMesh == null || _enemyMaterial == null) return;
 
         int batches = Mathf.CeilToInt((float)count / 1023f);
 
@@ -383,7 +528,7 @@ public class EnemyMother : NetworkBehaviour
             _mpb.SetFloatArray(_isWalkingHash,  _isWalkingBatches[b]);
             _mpb.SetFloatArray(_timeOffsetHash, _timeOffsetBatches[b]);
 
-            Graphics.DrawMeshInstanced(zombieMesh, 0, zombieMaterial, _matrixBatches[b], batchCount, _mpb);
+            Graphics.DrawMeshInstanced(_enemyMesh, 0, _enemyMaterial, _matrixBatches[b], batchCount, _mpb);
         }
     }
 
@@ -432,9 +577,9 @@ public class EnemyMother : NetworkBehaviour
             if (Enemies.Count + _pendingAdds.Count >= maxActiveEnemies) break;
 
             Vector3 spawnPos = GetSpawnPointFromMom();
-            GameObject newEnemyObj = Instantiate(enemyPrefab, spawnPos, Quaternion.identity);
+            Enemy simpleEnemy = GetOrCreateEnemy(spawnPos);
 
-            if (newEnemyObj.TryGetComponent(out Enemy simpleEnemy))
+            if (simpleEnemy != null)
             {
                 Transform target = dedicatedTarget != null && dedicatedTarget.gameObject.activeInHierarchy
                     ? dedicatedTarget

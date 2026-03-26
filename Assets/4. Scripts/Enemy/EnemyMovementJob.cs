@@ -18,7 +18,7 @@ public struct EnemyMovementJob : IJobParallelForTransform
     public NativeArray<Quaternion> Rotations;
     [ReadOnly] public float ElapsedTime;
     [ReadOnly] public float DeltaTime;
-    [ReadOnly] public float Speed;
+    [ReadOnly] public NativeArray<float> Speeds;
     [ReadOnly] public float RotationSpeed;
     [ReadOnly] public float Gravity;
     [ReadOnly] public float SeparationRadius;
@@ -126,7 +126,7 @@ public struct EnemyMovementJob : IJobParallelForTransform
         if (separation.sqrMagnitude > 4.0f) separation = separation.normalized * 2.0f;
 
         float currentYVel = YVelocities[index];
-        float currentSpeed = (distSqr < 2.0f) ? 0f : Speed;
+        float currentSpeed = (distSqr < 2.0f) ? 0f : Speeds[index];
 
         Vector3 xzVelocity = (desiredDir * currentSpeed) + (separation * SeparationWeight);
 
@@ -136,12 +136,12 @@ public struct EnemyMovementJob : IJobParallelForTransform
         {
             float dist = math.sqrt(distSqr);
             Vector3 radial = new Vector3(toTarget.x / dist, 0f, toTarget.z / dist);
-            Vector3 tangentCW  = new Vector3( radial.z, 0f, -radial.x);
-            Vector3 tangentCCW = new Vector3(-radial.z, 0f,  radial.x);
-            float cwDot  = separation.x * tangentCW.x  + separation.z * tangentCW.z;
+            Vector3 tangentCW = new Vector3(radial.z, 0f, -radial.x);
+            Vector3 tangentCCW = new Vector3(-radial.z, 0f, radial.x);
+            float cwDot = separation.x * tangentCW.x + separation.z * tangentCW.z;
             float ccwDot = separation.x * tangentCCW.x + separation.z * tangentCCW.z;
             Vector3 chosenTangent = (cwDot >= ccwDot) ? tangentCW : tangentCCW;
-            float tangentStrength = math.max(0f, 1f - dist / 3.0f) * Speed * 0.8f;
+            float tangentStrength = math.max(0f, 1f - dist / 3.0f) * Speeds[index] * 0.8f;
             xzVelocity.x += chosenTangent.x * tangentStrength;
             xzVelocity.z += chosenTangent.z * tangentStrength;
         }
@@ -170,7 +170,7 @@ public struct EnemyMovementJob : IJobParallelForTransform
 
             if (yDiff > 0.1f) // 오르막
             {
-                currentPos.y += math.min(yDiff, Speed * 1.5f * dt);
+                currentPos.y += math.min(yDiff, Speeds[index] * 1.5f * dt);
                 currentYVel = 0f;
             }
             else if (yDiff < -0.1f) // 내리막 또는 추락
