@@ -28,6 +28,9 @@ public class EnemyMother : NetworkBehaviour
     public float globalRotationSpeed = 360f;
     public float cellSize = 2.0f;
 
+    // SpawnTransformHandler가 Spawn 직전에 설정 — StageHandler 설정 인덱스와 대응
+    [HideInInspector] public int motherIndex = -1;
+
     [HideInInspector]
     public Vector3[] injectedStairs;
 
@@ -54,6 +57,9 @@ public class EnemyMother : NetworkBehaviour
     private NativeArray<int> _targetIndices;
     private NativeArray<Vector3> _activeTargetPositions;
     private NativeArray<float> _speeds;
+
+    // NativeArray 할당 크기 — OnStartNetwork에서 고정됨 (Configure로 변경 불가)
+    private int _nativeCapacity;
 
     private FlowFieldSystem _ffs;
     private NativeParallelMultiHashMap<int, int> _spatialGrid;
@@ -334,6 +340,7 @@ public class EnemyMother : NetworkBehaviour
             if (ValidTargets[i] == null || !ValidTargets[i].gameObject.activeInHierarchy)
                 ValidTargets.RemoveAt(i);
 
+        _nativeCapacity = maxActiveEnemies;
         _transformAccessArray = new TransformAccessArray(maxActiveEnemies);
         _raycastCommands = new NativeArray<RaycastCommand>(maxActiveEnemies * 2, Allocator.Persistent);
         _raycastHits = new NativeArray<RaycastHit>(maxActiveEnemies * 2, Allocator.Persistent);
@@ -379,6 +386,45 @@ public class EnemyMother : NetworkBehaviour
         // [수정 2] FFS 참조만 가져옴. Initialize는 SpawnTransformHandler에서 이미 호출하므로 중복 호출 안 함.
         _ffs = FindFirstObjectByType<FlowFieldSystem>();
 
+        // StageHandler가 있으면 인덱스로 설정 조회 → Configure (모든 클라이언트)
+        StageHandler sh = StageHandler.Instance;
+        if (sh != null && motherIndex >= 0)
+        {
+            MotherSpawnConfig config = sh.GetConfig(motherIndex);
+            if (config != null) Configure(config);
+        }
+
+        // Wave 시작 여부 결정 (서버만 SpawnWaveRoutine 실행)
+        // StageHandler 없음  → 기존 동작 그대로 자동 시작
+        // StageHandler 있음  → ShouldStartWave AND 해당 Mother isActive 일 때만 시작
+        if (IsServerInitialized)
+        {
+            bool shouldStart = sh == null
+                || (sh.ShouldStartWave && sh.GetConfig(motherIndex)?.isActive == true);
+
+            if (shouldStart) StartSpawning();
+        }
+    }
+
+    // ─── StageHandler에서 호출 ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// 모든 클라이언트에서 호출 — enemyPrefab 교체 및 스폰 파라미터 설정.
+    /// NativeArray 크기는 _nativeCapacity를 초과할 수 없음.
+    /// </summary>
+    public void Configure(MotherSpawnConfig config)
+    {
+        maxActiveEnemies = Mathf.Clamp(config.maxEnemies, 1, _nativeCapacity);
+        startDelay       = config.startDelay;
+        spawnInterval    = config.spawnInterval;
+        enemiesPerSpawn  = config.enemiesPerSpawn;
+    }
+
+    /// <summary>
+    /// 서버에서만 호출 — SpawnWaveRoutine 시작.
+    /// </summary>
+    public void StartSpawning()
+    {
         if (IsServerInitialized) StartCoroutine(SpawnWaveRoutine());
     }
 

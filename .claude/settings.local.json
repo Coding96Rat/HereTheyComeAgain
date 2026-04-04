@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__unity-mcp__manage_gameobject",
+      "mcp__unity-mcp__read_console",
+      "mcp__unity-mcp__refresh_unity"
+    ]
+  }
+}

@@ -137,6 +137,9 @@ public class SpawnTransformHandler : NetworkBehaviour
 
             if (mother.TryGetComponent(out EnemyMother motherScript))
             {
+                // StageHandler 설정 인덱스와 대응 — OnStartNetwork에서 GetConfig(motherIndex)로 참조
+                motherScript.motherIndex = i;
+
                 if (i < playerFirewalls.Length && playerFirewalls[i] != null)
                     motherScript.dedicatedTarget = playerFirewalls[i];
 

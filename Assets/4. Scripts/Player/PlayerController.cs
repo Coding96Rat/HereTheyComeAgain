@@ -152,6 +152,9 @@ public class PlayerController : NetworkBehaviour
 
     private void HandleLook()
     {
+        // 빌딩 목록 UI 등으로 커서가 해제된 상태에선 시점 이동 금지
+        if (Cursor.lockState != CursorLockMode.Locked) return;
+
         float mouseX = Input.GetAxis("Mouse X") * lookSpeed;
         float mouseY = Input.GetAxis("Mouse Y") * lookSpeed;
 

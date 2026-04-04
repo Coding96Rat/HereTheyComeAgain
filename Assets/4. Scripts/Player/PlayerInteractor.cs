@@ -19,10 +19,23 @@ public class PlayerInteractor : NetworkBehaviour
     public LayerMask shootableLayer;
     public LayerMask blockingLayer;
 
+    [Header("Building Mode (B 키)")]
+    [Tooltip("빌딩 레이캐스트가 맞을 레이어 (Terrain/Ground)")]
+    public LayerMask buildGroundLayer;
+
     private float _nextFireTime = 0f;
 
     public bool IsInteractDetected { get; private set; }
     public string CurrentInteractPrompt { get; private set; }
+
+    // ─── Building Mode ────────────────────────────────────────────────────────
+    private bool           _isBuildMode;
+    private BuildingHelper _buildingHelper;
+    private BuildingListUI _cachedBuildingListUI;
+    private bool           _helperInitialized;
+    private bool           _listUIInitialized;
+    private int            _selectedBuildingId = -1;
+    // ──────────────────────────────────────────────────────────────────────────
 
     private HUDController hudController;
 
@@ -50,10 +63,11 @@ public class PlayerInteractor : NetworkBehaviour
 
         if (base.Owner.IsLocalClient)
         {
-            // 이미 StageScene에 있는 상태로 네트워크가 시작된 경우 즉시 무장
+            // 이미 StageScene에 있는 상태로 네트워크가 시작된 경우 즉시 초기화
             if (UnityEngine.SceneManagement.SceneManager.GetActiveScene().name == "StageScene")
             {
                 isArmed = true;
+                InitializeStageRefs();
             }
             else
             {
@@ -69,6 +83,13 @@ public class PlayerInteractor : NetworkBehaviour
         // OnStopNetwork 시점엔 소유권 정보가 이미 해제될 수 있으므로 IsOwner 대신 무조건 해제
         if (base.SceneManager != null)
             base.SceneManager.OnLoadEnd -= OnSceneLoadEnd;
+
+        // 빌딩 모드 정리
+        if (_isBuildMode)
+        {
+            CancelSelection();
+            _isBuildMode = false;
+        }
     }
 
     private void OnSceneLoadEnd(SceneLoadEndEventArgs args)
@@ -78,15 +99,53 @@ public class PlayerInteractor : NetworkBehaviour
             if (scene.name == "StageScene")
             {
                 isArmed = true;
+                InitializeStageRefs();
                 base.SceneManager.OnLoadEnd -= OnSceneLoadEnd;
                 return;
             }
         }
     }
 
+    /// <summary>
+    /// StageScene 로드 시 딱 한 번만 실행 — 무거운 Find 계열 호출을 여기에 집중.
+    /// BuildingSystem.Instance, GridSystem.Instance는 싱글턴이라 Find 없이 접근 가능.
+    /// </summary>
+    private void InitializeStageRefs()
+    {
+        // ── 1. BuildingHelper: GridSystem이 준비되면 즉시 생성 (1회)
+        if (!_helperInitialized && GridSystem.Instance != null)
+        {
+            _buildingHelper    = new BuildingHelper(GridSystem.Instance);
+            _helperInitialized = true;
+        }
+
+        // ── 2. BuildingListUI: 씬에서 1회 Find (이미 찾았으면 스킵)
+        if (_cachedBuildingListUI == null)
+            _cachedBuildingListUI = Object.FindFirstObjectByType<BuildingListUI>();
+
+        // ── 3. 리스트 UI 초기화: BuildingSystem이 준비됐을 때만 실행 (1회)
+        //       BuildingSystem.Instance가 null이면 이 블록을 건너뛰고
+        //       다음 B 키 진입 시 다시 시도한다 (_listUIInitialized = false 유지)
+        if (!_listUIInitialized && _cachedBuildingListUI != null && BuildingSystem.Instance != null)
+        {
+            _cachedBuildingListUI.Initialize(BuildingSystem.Instance, OnBuildingSelected);
+            _listUIInitialized = true;
+        }
+    }
+
     void Update()
     {
         if (!IsOwner) return;
+
+        // ── 빌딩 모드 토글 (StageScene에서만 유효) ──
+        if (Input.GetKeyDown(KeyCode.B) && isArmed)
+            ToggleBuildMode();
+
+        if (_isBuildMode)
+        {
+            HandleBuildMode();
+            return;   // 빌딩 모드 중엔 일반 인터랙션/사격 스킵
+        }
 
         CheckInteractHover();
 
@@ -95,6 +154,124 @@ public class PlayerInteractor : NetworkBehaviour
             _nextFireTime = Time.time + 1f / fireRate;
             TryShoot();
         }
+    }
+
+    // ─── 빌딩 모드 진입/종료 ─────────────────────────────────────────────────
+
+    private void ToggleBuildMode()
+    {
+        _isBuildMode = !_isBuildMode;
+
+        if (_isBuildMode)
+        {
+            EnterBuildMode();
+        }
+        else
+        {
+            ExitBuildMode();
+        }
+    }
+
+    private void EnterBuildMode()
+    {
+        // 미완료 항목이 있으면 재시도 (BuildingSystem.Instance 타이밍 문제 대비)
+        InitializeStageRefs();
+        Debug.Log($"[BuildMode] 진입 — helper={_helperInitialized}, listUI={_listUIInitialized}, B:종료 Tab:목록");
+    }
+
+    private void ExitBuildMode()
+    {
+        CancelSelection();                          // 선택 중이면 먼저 정리
+        _cachedBuildingListUI?.SetVisible(false);   // 목록 UI 닫기
+
+        Cursor.lockState = CursorLockMode.Locked;
+        Cursor.visible   = false;
+
+        Debug.Log("[BuildMode] 종료");
+    }
+
+    // ─── 빌딩 모드 업데이트 ──────────────────────────────────────────────────
+
+    private void HandleBuildMode()
+    {
+        // ESC: 건물 선택만 취소, 빌딩 모드는 유지 (Idle 상태로 복귀)
+        if (Input.GetKeyDown(KeyCode.Escape))
+        {
+            CancelSelection();
+            return;
+        }
+
+        // Tab: 건물 목록 토글
+        if (Input.GetKeyDown(KeyCode.Tab))
+        {
+            _cachedBuildingListUI?.ToggleVisible();
+            return;
+        }
+
+        // 목록이 열려 있으면 미리보기/설치 로직 스킵
+        bool listOpen = _cachedBuildingListUI != null && _cachedBuildingListUI.IsVisible;
+        if (listOpen) return;
+
+        // 건물이 선택되지 않았으면 미리보기 없음 (Idle)
+        if (_selectedBuildingId < 0 || _buildingHelper == null) return;
+
+        if (buildGroundLayer == 0)
+        {
+            Debug.LogWarning("[BuildMode] buildGroundLayer가 설정되지 않았습니다! PlayerInteractor 인스펙터에서 Terrain 레이어를 지정하세요.");
+            return;
+        }
+
+        var preview = BuildingSystem.Instance?.Preview;
+        if (preview == null) return;
+
+        // 레이캐스트 → 그리드 스냅 (수학 연산, O(1))
+        Ray  ray = new Ray(cameraTransform.position, cameraTransform.forward);
+        bool hit = _buildingHelper.GetGridFromRay(ray, buildGroundLayer,
+            out Vector3 snappedPos, out int gridX, out int gridZ);
+
+        if (!hit) return;
+
+        BuildingDataSO data = BuildingSystem.Instance.GetBuildingData(_selectedBuildingId);
+        if (data == null) return;
+
+        PlacementResult result = _buildingHelper.CheckPlacement(data, gridX, gridZ);
+        preview.UpdatePreview(snappedPos, gridX, gridZ, result);
+
+        // 좌클릭: 설치 확정
+        if (Input.GetMouseButtonDown(0))
+            TryConfirmPlacement(gridX, gridZ, result);
+    }
+
+    private void TryConfirmPlacement(int gridX, int gridZ, PlacementResult result)
+    {
+        if (result == PlacementResult.Blocked       ||
+            result == PlacementResult.TerrainTooHigh ||
+            result == PlacementResult.OutOfBounds)
+            return;
+
+        BuildingSystem.Instance?.ServerPlaceBuilding(_selectedBuildingId, gridX, gridZ);
+        CancelSelection();  // 설치 후 선택 초기화 → Idle 상태
+    }
+
+    // ─── 건물 선택 / 취소 ────────────────────────────────────────────────────
+
+    private void OnBuildingSelected(int buildingId)
+    {
+        _selectedBuildingId = buildingId;
+
+        BuildingDataSO data = BuildingSystem.Instance?.GetBuildingData(buildingId);
+        BuildingSystem.Instance?.Preview?.SetBuilding(data);
+    }
+
+    /// <summary>
+    /// 건물 선택을 취소하고 빌딩 모드 Idle 상태로 복귀.
+    /// 프리뷰 비주얼/지형 미리보기 복원. 빌딩 모드 자체는 유지.
+    /// </summary>
+    private void CancelSelection()
+    {
+        if (_selectedBuildingId < 0) return;   // 이미 Idle
+        BuildingSystem.Instance?.Preview?.ClearBuilding();
+        _selectedBuildingId = -1;
     }
 
     private void CheckInteractHover()

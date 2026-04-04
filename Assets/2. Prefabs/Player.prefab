@@ -157,7 +157,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: FishNet.Runtime::FishNet.Component.Transforming.NetworkTransform
   _componentIndexCache: 0
   _addedNetworkObject: {fileID: -431194301025651805}
-  _networkObjectCache: {fileID: 0}
+  _networkObjectCache: {fileID: -431194301025651805}
   _componentConfiguration: 1
   _synchronizeParent: 0
   _packing:
@@ -203,7 +203,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: FishNet.Runtime::FishNet.Component.Animating.NetworkAnimator
   _componentIndexCache: 1
   _addedNetworkObject: {fileID: -431194301025651805}
-  _networkObjectCache: {fileID: 0}
+  _networkObjectCache: {fileID: -431194301025651805}
   IgnoredParameters: []
   _animator: {fileID: 8834263961563125541}
   _synchronizeWhenDisabled: 0
@@ -225,7 +225,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::PlayerController
   _componentIndexCache: 2
   _addedNetworkObject: {fileID: -431194301025651805}
-  _networkObjectCache: {fileID: 0}
+  _networkObjectCache: {fileID: -431194301025651805}
   moveSpeed: 5
   sprintSpeed: 10
   lookSpeed: 2
@@ -260,7 +260,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::PlayerInteractor
   _componentIndexCache: 3
   _addedNetworkObject: {fileID: -431194301025651805}
-  _networkObjectCache: {fileID: 0}
+  _networkObjectCache: {fileID: -431194301025651805}
   cameraTransform: {fileID: 5474116367813166304}
   interactDistance: 3
   interactLayer:
@@ -274,6 +274,9 @@ MonoBehaviour:
     serializedVersion: 2
     m_Bits: 128
   blockingLayer:
+    serializedVersion: 2
+    m_Bits: 256
+  buildGroundLayer:
     serializedVersion: 2
     m_Bits: 256
 --- !u!143 &7696904341346734339
@@ -314,12 +317,16 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: FishNet.Runtime::FishNet.Object.NetworkObject
   <IsNested>k__BackingField: 0
-  WasActiveDuringEdit: 1
+  WasActiveDuringEdit: 0
   WasActiveDuringEdit_Set1: 1
   <ComponentIndex>k__BackingField: 0
   <PredictedSpawn>k__BackingField: {fileID: 0}
   <PredictedOwner>k__BackingField: {fileID: 0}
-  NetworkBehaviours: []
+  NetworkBehaviours:
+  - {fileID: 750124785729575336}
+  - {fileID: 5225923697435210727}
+  - {fileID: 7285294384761612406}
+  - {fileID: 7390615097221837288}
   InitializedParentNetworkBehaviour: {fileID: 0}
   InitializedNestedNetworkObjects: []
   RuntimeParentNetworkBehaviour: {fileID: 0}
@@ -330,7 +337,7 @@ MonoBehaviour:
   _initializeOrder: 0
   _preventDespawnOnDisconnect: 0
   _defaultDespawnType: 0
-  _initializedTimestamp: 0
+  _initializedTimestamp: -8584263356436370565
   NetworkObserver: {fileID: 0}
   _enablePrediction: 0
   _predictionType: 0
@@ -346,15 +353,15 @@ MonoBehaviour:
   _spectatorInterpolation: 2
   _enableTeleport: 0
   _teleportThreshold: 1
-  <PrefabId>k__BackingField: 65535
+  <PrefabId>k__BackingField: 10
   <SpawnableCollectionId>k__BackingField: 0
   <AssetPathHash>k__BackingField: 14512611320714262603
   SceneId: 0
   SerializedTransformProperties:
     Position: {x: 0, y: 0, z: 0}
-    Rotation: {x: 0, y: 0, z: 0, w: 0}
-    Scale: {x: 0, y: 0, z: 0}
-    IsValid: 0
+    Rotation: {x: 0, y: 0, z: 0, w: 1}
+    Scale: {x: 1, y: 1, z: 1}
+    IsValid: 1
 --- !u!1 &3731418401212876689
 GameObject:
   m_ObjectHideFlags: 0
