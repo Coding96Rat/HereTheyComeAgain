@@ -5,8 +5,7 @@ using UnityEngine;
 ///
 /// 역할:
 ///  1. 단일 레이캐스트 → 수학 연산으로 그리드 셀 특정 (셀별 Physics 없음, 성능 보장)
-///  2. 건물 설치 가능 여부 검사 (그리드 점유 + 지형 높이)
-///  3. 침범 지형 영역만 정확히 평탄화
+///  2. 건물 설치 가능 여부 검사 (그리드 점유 + 지형 유무)
 /// </summary>
 public class BuildingHelper
 {
@@ -29,21 +28,28 @@ public class BuildingHelper
         snappedWorldPos = UnityEngine.Vector3.zero;
         gridX = gridZ = 0;
 
-        if (!UnityEngine.Physics.Raycast(ray, out UnityEngine.RaycastHit hit, UnityEngine.Mathf.Infinity, groundMask))
-            return false;
+        // Y=0 평면과 레이의 교차점으로 그리드를 결정
+        float dirY = ray.direction.y;
+        if (dirY >= -0.001f) return false;
 
-        _gridSystem.GetGridPosition(hit.point, out gridX, out gridZ);
+        float t = -ray.origin.y / dirY;
+        if (t < 0f || t > 150f) return false;
+
+        UnityEngine.Vector3 groundPoint = ray.GetPoint(t);
+        _gridSystem.GetGridPosition(groundPoint, out gridX, out gridZ);
+
         snappedWorldPos = _gridSystem.GetWorldPosition(gridX, gridZ);
         return true;
     }
 
     // ─── 2. 설치 가능 여부 검사 ───────────────────────────────────────────────
 
+    /// <summary>
+    /// 건물 풋프린트 내 셀 중 하나라도 Terrain 높이가 있으면 TerrainBlocked 반환.
+    /// </summary>
     public PlacementResult CheckPlacement(BuildingDataSO data, int gridX, int gridZ)
     {
         UnityEngine.Terrain terrain = UnityEngine.Terrain.activeTerrain;
-        float maxIntrusion = _gridSystem.CellSize * data.maxTerrainIntrusionRatio;
-        bool needsFlattening = false;
 
         for (int dx = 0; dx < data.sizeX; dx++)
         {
@@ -63,74 +69,96 @@ public class BuildingHelper
 
                 if (terrain != null)
                 {
-                    UnityEngine.Vector3 cellCenter = _gridSystem.GetWorldPosition(cx, cz)
-                        + new UnityEngine.Vector3(_gridSystem.CellSize * 0.5f, 0f, _gridSystem.CellSize * 0.5f);
-                    float terrainHeight = terrain.SampleHeight(cellCenter);
+                    UnityEngine.Vector3 cellMin = _gridSystem.GetWorldPosition(cx, cz);
+                    float coverage = GetTerrainCoverageRatio(terrain, cellMin, _gridSystem.CellSize);
 
-                    if (terrainHeight > maxIntrusion)
-                        return PlacementResult.TerrainTooHigh;
+                    // 외곽 셀: Terrain이 50% 이상 차지하면 설치 불가
+                    // 내부 셀: 조금이라도 Terrain 있으면 설치 불가
+                    bool isBorder = (dx == 0 || dx == data.sizeX - 1 ||
+                                     dz == 0 || dz == data.sizeZ - 1);
 
-                    if (terrainHeight > 0.01f)
-                        needsFlattening = true;
+                    if (isBorder ? coverage >= 0.5f : coverage > 0f)
+                        return PlacementResult.TerrainBlocked;
                 }
             }
         }
 
-        return needsFlattening ? PlacementResult.ValidWithFlattening : PlacementResult.Valid;
+        return PlacementResult.Valid;
     }
-
-    // ─── 3. 지형 평탄화 ───────────────────────────────────────────────────────
 
     /// <summary>
-    /// 건물 풋프린트 중 실제로 지형이 침범한 셀만 정확히 높이 0으로 평탄화.
-    /// 모든 클라이언트에서 동일하게 호출돼야 하므로 ObserversRpc로 트리거됨.
+    /// 배치 코너 그리드(placeGridX/Z)와 빌딩 데이터를 받아,
+    /// 프리팹 메시 중심(Bounds.center)이 커서 셀 XZ 중앙에 오도록 계산된 Transform 월드 위치 반환.
     /// </summary>
-    public void FlattenTerrainUnderBuilding(BuildingDataSO data, int gridX, int gridZ)
+    public UnityEngine.Vector3 GetCenteredSpawnPosition(BuildingDataSO data, int placeGridX, int placeGridZ)
     {
-        UnityEngine.Terrain terrain = UnityEngine.Terrain.activeTerrain;
-        if (terrain == null) return;
+        int cursorX = placeGridX + data.sizeX / 2;
+        int cursorZ = placeGridZ + data.sizeZ / 2;
 
-        UnityEngine.TerrainData tData = terrain.terrainData;
-        int res = tData.heightmapResolution;
-        UnityEngine.Vector3 terrainPos = terrain.transform.position;
+        UnityEngine.Vector3 cornerPos = _gridSystem.GetWorldPosition(cursorX, cursorZ);
+        float half = _gridSystem.CellSize * 0.5f;
+        float targetCX = cornerPos.x + half;
+        float targetCZ = cornerPos.z + half;
 
-        for (int dx = 0; dx < data.sizeX; dx++)
+        UnityEngine.Bounds bounds = GetPrefabLocalBounds(data.prefab);
+
+        return new UnityEngine.Vector3(targetCX - bounds.center.x,
+                                       0f,
+                                       targetCZ - bounds.center.z);
+    }
+
+    private static UnityEngine.Bounds GetPrefabLocalBounds(UnityEngine.GameObject prefab)
+    {
+        var filters = prefab.GetComponentsInChildren<UnityEngine.MeshFilter>(true);
+        bool initialized = false;
+        UnityEngine.Bounds result = default;
+
+        foreach (var mf in filters)
         {
-            for (int dz = 0; dz < data.sizeZ; dz++)
-            {
-                UnityEngine.Vector3 cellMin = _gridSystem.GetWorldPosition(gridX + dx, gridZ + dz);
-                UnityEngine.Vector3 cellMax = cellMin + new UnityEngine.Vector3(_gridSystem.CellSize, 0f, _gridSystem.CellSize);
+            if (mf.sharedMesh == null) continue;
 
-                // SampleHeight 조건 제거 — 호스트 모드 타이밍 버그 방지
-                // (프리뷰가 이미 지형을 0으로 만든 상태에서 호출될 수 있으므로)
-                FlattenRect(tData, res, terrainPos, cellMin, cellMax);
+            UnityEngine.Matrix4x4 m = mf.transform.localToWorldMatrix;
+            UnityEngine.Bounds mesh  = mf.sharedMesh.bounds;
+            UnityEngine.Vector3 c    = mesh.center;
+            UnityEngine.Vector3 e    = mesh.extents;
+
+            for (int sx = -1; sx <= 1; sx += 2)
+            for (int sy = -1; sy <= 1; sy += 2)
+            for (int sz = -1; sz <= 1; sz += 2)
+            {
+                UnityEngine.Vector3 corner = m.MultiplyPoint3x4(
+                    c + new UnityEngine.Vector3(e.x * sx, e.y * sy, e.z * sz));
+
+                if (!initialized) { result = new UnityEngine.Bounds(corner, UnityEngine.Vector3.zero); initialized = true; }
+                else               result.Encapsulate(corner);
             }
         }
+
+        return initialized ? result : new UnityEngine.Bounds(UnityEngine.Vector3.zero, UnityEngine.Vector3.zero);
     }
 
-    private void FlattenRect(UnityEngine.TerrainData tData, int res,
-        UnityEngine.Vector3 terrainPos, UnityEngine.Vector3 worldMin, UnityEngine.Vector3 worldMax)
+    // ─── 내부 헬퍼 ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// 셀 내부를 3×3 격자(9개 지점)로 샘플링.
+    /// 각 지점의 Terrain 월드 Y > 0.05f 인 비율(0~1)을 반환.
+    /// 0 = 완전히 평탄, 1 = 9개 전부 지형에 덮힘.
+    /// </summary>
+    private float GetTerrainCoverageRatio(UnityEngine.Terrain terrain,
+        UnityEngine.Vector3 cellMin, float cellSize)
     {
-        int xMin = ToHmX(tData, res, terrainPos, worldMin.x);
-        int xMax = ToHmX(tData, res, terrainPos, worldMax.x);
-        int zMin = ToHmZ(tData, res, terrainPos, worldMin.z);
-        int zMax = ToHmZ(tData, res, terrainPos, worldMax.z);
+        float baseY  = terrain.transform.position.y;
+        int   hits   = 0;
+        float step   = cellSize * 0.5f;
 
-        xMin = UnityEngine.Mathf.Clamp(xMin, 0, res - 1);
-        xMax = UnityEngine.Mathf.Clamp(xMax, 0, res - 1);
-        zMin = UnityEngine.Mathf.Clamp(zMin, 0, res - 1);
-        zMax = UnityEngine.Mathf.Clamp(zMax, 0, res - 1);
-
-        int w = xMax - xMin + 1;
-        int h = zMax - zMin + 1;
-        if (w <= 0 || h <= 0) return;
-
-        tData.SetHeights(xMin, zMin, new float[h, w]);
+        for (int xi = 0; xi <= 2; xi++)
+        for (int zi = 0; zi <= 2; zi++)
+        {
+            float wx = cellMin.x + xi * step;
+            float wz = cellMin.z + zi * step;
+            float surfaceY = baseY + terrain.SampleHeight(new UnityEngine.Vector3(wx, 0f, wz));
+            if (surfaceY > 0.05f) hits++;
+        }
+        return hits / 9f;
     }
-
-    private int ToHmX(UnityEngine.TerrainData d, int res, UnityEngine.Vector3 tp, float wx)
-        => UnityEngine.Mathf.RoundToInt((wx - tp.x) / d.size.x * (res - 1));
-
-    private int ToHmZ(UnityEngine.TerrainData d, int res, UnityEngine.Vector3 tp, float wz)
-        => UnityEngine.Mathf.RoundToInt((wz - tp.z) / d.size.z * (res - 1));
 }

@@ -11,7 +11,6 @@ using UnityEngine;
 ///  - BuildingRegistrySO 보유 → id로 BuildingDataSO 제공
 ///  - 클라이언트 설치 요청(ServerRpc) 수신 → 서버 검증 → NetworkObject 스폰 → 전체 동기화
 ///  - 런타임 점유 셀 SyncList → 모든 클라이언트가 동일한 그리드 상태 유지
-///  - 지형 평탄화 ObserversRpc → 모든 클라이언트 Terrain 동기화
 /// </summary>
 public class BuildingSystem : NetworkBehaviour
 {
@@ -38,7 +37,6 @@ public class BuildingSystem : NetworkBehaviour
         Instance    = this;
         _gridSystem = Object.FindFirstObjectByType<GridSystem>();
 
-        // BuildingPreview는 같은 GO에 컴포넌트로 부착 — GetComponent로 참조
         Preview = GetComponent<BuildingPreview>();
         if (Preview != null && _gridSystem != null)
             Preview.Setup(_gridSystem);
@@ -64,10 +62,6 @@ public class BuildingSystem : NetworkBehaviour
 
     // ─── 설치 요청 (ServerRpc) ────────────────────────────────────────────────
 
-    /// <summary>
-    /// 클라이언트가 건물 설치를 요청한다.
-    /// 서버에서 재검증 후 이상 없으면 NetworkObject 스폰 + 지형 평탄화 RPC.
-    /// </summary>
     [ServerRpc(RequireOwnership = false)]
     public void ServerPlaceBuilding(int buildingId, int gridX, int gridZ, NetworkConnection caller = null)
     {
@@ -80,13 +74,11 @@ public class BuildingSystem : NetworkBehaviour
         var helper = new BuildingHelper(_gridSystem);
         PlacementResult result = helper.CheckPlacement(data, gridX, gridZ);
 
-        if (result == PlacementResult.Blocked    ||
-            result == PlacementResult.TerrainTooHigh ||
-            result == PlacementResult.OutOfBounds)
+        if (result != PlacementResult.Valid)
             return;
 
-        // 건물 스폰 — NetworkObject.Spawn()이 모든 클라이언트에 자동 전파
-        Vector3 worldPos   = _gridSystem.GetWorldPosition(gridX, gridZ);
+        // 건물 스폰
+        Vector3 worldPos    = helper.GetCenteredSpawnPosition(data, gridX, gridZ);
         GameObject instance = Instantiate(data.prefab, worldPos, Quaternion.identity);
         NetworkObject nob   = instance.GetComponent<NetworkObject>();
         if (nob != null) ServerManager.Spawn(nob);
@@ -101,24 +93,5 @@ public class BuildingSystem : NetworkBehaviour
                     _occupiedCellIndices.Add(idx);
             }
         }
-
-        // 항상 평탄화 RPC 호출 — 호스트 모드에서 프리뷰가 Terrain을 미리 0으로 만들면
-        // 서버가 Valid로 판정해 RPC를 안 보내는 타이밍 버그를 방지.
-        // 이미 평평한 지형에 SetHeights(0)을 재호출해도 부작용 없음.
-        RpcFlattenTerrain(buildingId, gridX, gridZ);
-    }
-
-    // ─── 지형 평탄화 RPC (ObserversRpc) ──────────────────────────────────────
-
-    [ObserversRpc]
-    private void RpcFlattenTerrain(int buildingId, int gridX, int gridZ)
-    {
-        if (_registry == null || _gridSystem == null) return;
-
-        BuildingDataSO data = _registry.GetById(buildingId);
-        if (data == null) return;
-
-        var helper = new BuildingHelper(_gridSystem);
-        helper.FlattenTerrainUnderBuilding(data, gridX, gridZ);
     }
 }

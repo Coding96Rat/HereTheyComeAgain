@@ -18,4 +18,4 @@ MonoBehaviour:
   icon: {fileID: 0}
   sizeX: 3
   sizeZ: 3
-  maxTerrainIntrusionRatio: 0.4
+  maxFlattenableTerrainHeight: 5

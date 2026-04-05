@@ -224,29 +224,35 @@ public class PlayerInteractor : NetworkBehaviour
         var preview = BuildingSystem.Instance?.Preview;
         if (preview == null) return;
 
-        // 레이캐스트 → 그리드 스냅 (수학 연산, O(1))
-        Ray  ray = new Ray(cameraTransform.position, cameraTransform.forward);
-        bool hit = _buildingHelper.GetGridFromRay(ray, buildGroundLayer,
-            out Vector3 snappedPos, out int gridX, out int gridZ);
-
-        if (!hit) return;
-
         BuildingDataSO data = BuildingSystem.Instance.GetBuildingData(_selectedBuildingId);
         if (data == null) return;
 
-        PlacementResult result = _buildingHelper.CheckPlacement(data, gridX, gridZ);
-        preview.UpdatePreview(snappedPos, gridX, gridZ, result);
+        // Y=0 평면 교차로 커서 셀 결정 — 수학적으로 안정적이라 히스테리시스 불필요
+        Ray  ray = new Ray(cameraTransform.position, cameraTransform.forward);
+        bool hit = _buildingHelper.GetGridFromRay(ray, buildGroundLayer,
+            out _, out int cursorX, out int cursorZ);
+
+        if (!hit) return;
+
+        // 빌딩 중심 앵커: 커서 셀 = 빌딩 메시 중심(Bounds)의 바닥 그리드 셀
+        // sizeX=3 → offset=-1, sizeX=1 → offset=0
+        int placeX = cursorX - data.sizeX / 2;
+        int placeZ = cursorZ - data.sizeZ / 2;
+
+        // 메시 Bounds.center 기준으로 커서 셀 XZ 중앙에 정렬된 Transform 위치
+        Vector3 snappedPos = _buildingHelper.GetCenteredSpawnPosition(data, placeX, placeZ);
+
+        PlacementResult result = _buildingHelper.CheckPlacement(data, placeX, placeZ);
+        preview.UpdatePreview(snappedPos, result);
 
         // 좌클릭: 설치 확정
         if (Input.GetMouseButtonDown(0))
-            TryConfirmPlacement(gridX, gridZ, result);
+            TryConfirmPlacement(placeX, placeZ, result);
     }
 
     private void TryConfirmPlacement(int gridX, int gridZ, PlacementResult result)
     {
-        if (result == PlacementResult.Blocked       ||
-            result == PlacementResult.TerrainTooHigh ||
-            result == PlacementResult.OutOfBounds)
+        if (result != PlacementResult.Valid)
             return;
 
         BuildingSystem.Instance?.ServerPlaceBuilding(_selectedBuildingId, gridX, gridZ);

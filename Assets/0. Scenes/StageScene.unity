@@ -701,8 +701,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::BuildingPreview
   _canPlaceColor: {r: 1, g: 1, b: 1, a: 0.45}
-  _cantPlaceColor: {r: 1, g: 0.15, b: 0.15, a: 0.5}
-  _enableTerrainPreview: 1
+  _cantPlaceColor: {r: 1, g: 0, b: 0, a: 1}
   _heightOffset: 0.02
 --- !u!1 &1309645421
 GameObject:
@@ -1050,26 +1049,26 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::StageHandler
   _startWaveOnInit: 1
   _motherConfigs:
-  - isActive: 0
-    maxEnemies: 100
-    startDelay: 10
-    spawnInterval: 0
-    enemiesPerSpawn: 0
-  - isActive: 0
-    maxEnemies: 0
-    startDelay: 0
-    spawnInterval: 0
-    enemiesPerSpawn: 0
-  - isActive: 0
-    maxEnemies: 0
-    startDelay: 0
-    spawnInterval: 0
-    enemiesPerSpawn: 0
-  - isActive: 0
-    maxEnemies: 0
-    startDelay: 0
-    spawnInterval: 0
-    enemiesPerSpawn: 0
+  - isActive: 1
+    maxEnemies: 1000
+    startDelay: 1
+    spawnInterval: 0.1
+    enemiesPerSpawn: 10
+  - isActive: 1
+    maxEnemies: 1000
+    startDelay: 1
+    spawnInterval: 0.1
+    enemiesPerSpawn: 10
+  - isActive: 1
+    maxEnemies: 1000
+    startDelay: 1
+    spawnInterval: 0.1
+    enemiesPerSpawn: 10
+  - isActive: 1
+    maxEnemies: 1000
+    startDelay: 1
+    spawnInterval: 0.1
+    enemiesPerSpawn: 10
 --- !u!4 &1763012765
 Transform:
   m_ObjectHideFlags: 0
