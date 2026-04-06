@@ -9,7 +9,7 @@ public class PlayerController : NetworkBehaviour
     [Header("Movement Settings")]
     public float moveSpeed = 5f;
     public float sprintSpeed = 10f;
-    private float _currentSpeed;
+    private float _currentSpeed = 5f;
     public float lookSpeed = 2f;
     public float gravity = -9.81f;
 
@@ -51,6 +51,8 @@ public class PlayerController : NetworkBehaviour
     public override void OnStartNetwork()
     {
         base.OnStartNetwork();
+
+        _currentSpeed = moveSpeed;
 
         // 좀비 추적 타겟 명단 등록
         EnemyMother.RegisterTarget(this.transform);
@@ -100,6 +102,13 @@ public class PlayerController : NetworkBehaviour
         if (!IsOwner) return;
 
         HandleMovement();
+    }
+
+    // 캐릭터 물리 이동이 모두 끝난 뒤 카메라를 회전시켜 프레임 페이싱 끊김 방지
+    void LateUpdate()
+    {
+        if (!IsOwner) return;
+
         HandleLook();
     }
 
@@ -129,7 +138,11 @@ public class PlayerController : NetworkBehaviour
         // 대각선 폭주 방지 — 벡터 최대 길이 1로 제한
         horizontalMove = Vector3.ClampMagnitude(horizontalMove, 1f);
 
-        _currentSpeed = Input.GetKey(KeyCode.LeftShift) ? sprintSpeed : moveSpeed;
+        // 공중에서는 속도 변경 금지 — 점프 전 속도 유지
+        if (_isGrounded)
+        {
+            _currentSpeed = Input.GetKey(KeyCode.LeftShift) ? sprintSpeed : moveSpeed;
+        }
 
         // 수직 이동(중력/점프) 계산
         if (_isGrounded && velocity.y < 0)

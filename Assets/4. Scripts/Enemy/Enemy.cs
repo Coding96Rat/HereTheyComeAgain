@@ -64,6 +64,7 @@ public class Enemy : MonoBehaviour
 #if UNITY_EDITOR
     private void OnDrawGizmos()
     {
+        // 플레이 중에는 호출 자체를 막음 — 좀비 수만큼 매 프레임 실행되므로
         if (UnityEditor.EditorApplication.isPlaying) return;
 
         // 프리뷰 메시 — data.mesh를 반투명 고스트로 그려서 캡슐 크기 조절 기준으로 활용
@@ -78,7 +79,7 @@ public class Enemy : MonoBehaviour
             );
         }
 
-        // Hit Capsule
+        // Hit Capsule — Body
         float halfExtent = Mathf.Max(0f, hitHeight * 0.5f - hitRadius);
         Vector3 center       = transform.position + hitCenterOffset;
         Vector3 topCenter    = center + Vector3.up * halfExtent;
@@ -96,9 +97,10 @@ public class Enemy : MonoBehaviour
         Gizmos.color = new Color(1f, 0.5f, 0f, 0.9f);
         Gizmos.DrawWireSphere(center, 0.08f);
 
-        // 머리 구체 (빨간색)
+        // Hit Capsule — Head
         Gizmos.color = new Color(1f, 0.15f, 0.15f, 0.9f);
         Gizmos.DrawWireSphere(transform.position + hitHeadOffset, hitHeadRadius);
     }
 #endif
+
 }

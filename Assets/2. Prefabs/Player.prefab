@@ -237,7 +237,7 @@ MonoBehaviour:
   bobVelocityThreshold: -4
   groundLayer:
     serializedVersion: 2
-    m_Bits: 256
+    m_Bits: 1280
   groundCheckDistance: 0.15
   characterController: {fileID: 7696904341346734339}
   cameraTarget: {fileID: 8079708260545395504}

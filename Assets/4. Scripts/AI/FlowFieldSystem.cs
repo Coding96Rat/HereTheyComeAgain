@@ -17,11 +17,6 @@ public class FlowFieldSystem : MonoBehaviour
     public LayerMask obstacleLayer;
     public float maxWalkableSlope = 45f;
 
-    [Header("Debug & Gizmos")]
-    public bool showObstacleBlocks = true;
-    public bool showFlowArrows = true;
-    [Range(0, 3)] public int debugPlayerIndex = 0;
-
     [SerializeField, HideInInspector] private byte[] _savedCostField;
     [SerializeField, HideInInspector] private int _savedCols, _savedRows;
     [SerializeField, HideInInspector] private Vector3 _savedBottomLeft;
@@ -272,50 +267,6 @@ public class FlowFieldSystem : MonoBehaviour
                     else cost = (Physics.CheckSphere(hit.point, 1.2f, obstacleLayer)) ? (byte)5 : (byte)1;
 
                     _savedCostField[flatIndex] = cost;
-                }
-            }
-        }
-    }
-
-    private void OnDrawGizmos()
-    {
-        if (_savedCols == 0 || _savedRows == 0) return;
-        Vector3 centerOffset = new Vector3(aiCellSize / 2f, 0, aiCellSize / 2f);
-        Vector3 cubeSize = new Vector3(aiCellSize, 0.2f, aiCellSize);
-
-        if (showObstacleBlocks && _savedCostField != null && _savedCostField.Length > 0)
-        {
-            // 플레이 중에는 저장된 Bake 데이터만 표시 (런타임 동적 마킹 셀 제외)
-            // → PlacedStructure가 cost=255로 마킹한 셀이 빨간색으로 덮이는 현상 방지
-            for (int x = 0; x < _savedCols; x++)
-            {
-                for (int z = 0; z < _savedRows; z++)
-                {
-                    int flatIndex = z * _savedCols + x;
-                    byte cost = _savedCostField[flatIndex]; // 항상 baked 데이터 사용
-
-                    if (cost == 255) { Gizmos.color = new Color(1f, 0f, 0f, 0.5f); Gizmos.DrawCube(_savedBottomLeft + new Vector3(x * aiCellSize, 0, z * aiCellSize) + centerOffset, cubeSize); }
-                    else if (cost == 5) { Gizmos.color = new Color(1f, 1f, 0f, 0.3f); Gizmos.DrawCube(_savedBottomLeft + new Vector3(x * aiCellSize, 0, z * aiCellSize) + centerOffset, cubeSize); }
-                }
-            }
-        }
-        if (showFlowArrows && Application.isPlaying && NativeFlowFields != null)
-        {
-            if (debugPlayerIndex < 0 || debugPlayerIndex >= NativeFlowFields.Length || !NativeFlowFields[debugPlayerIndex].IsCreated) return;
-            Gizmos.color = Color.magenta;
-            for (int x = 0; x < _cols; x++)
-            {
-                for (int z = 0; z < _rows; z++)
-                {
-                    int flatIndex = z * _cols + x;
-                    if (_costField[flatIndex] == 255) continue;
-                    Vector3 dir = NativeFlowFields[debugPlayerIndex][flatIndex];
-                    if (dir.sqrMagnitude > 0.1f)
-                    {
-                        Vector3 startPos = _bottomLeft + new Vector3(x * aiCellSize, 3.0f, z * aiCellSize) + centerOffset;
-                        Vector3 endPos = startPos + (dir * aiCellSize * 0.8f);
-                        Gizmos.DrawLine(startPos, endPos); Gizmos.DrawSphere(endPos, 0.3f);
-                    }
                 }
             }
         }

@@ -29,12 +29,12 @@ public class PlayerInteractor : NetworkBehaviour
     public string CurrentInteractPrompt { get; private set; }
 
     // ─── Building Mode ────────────────────────────────────────────────────────
-    private bool           _isBuildMode;
+    private bool _isBuildMode;
     private BuildingHelper _buildingHelper;
     private BuildingListUI _cachedBuildingListUI;
-    private bool           _helperInitialized;
-    private bool           _listUIInitialized;
-    private int            _selectedBuildingId = -1;
+    private bool _helperInitialized;
+    private bool _listUIInitialized;
+    private int _selectedBuildingId = -1;
     // ──────────────────────────────────────────────────────────────────────────
 
     private HUDController hudController;
@@ -115,7 +115,7 @@ public class PlayerInteractor : NetworkBehaviour
         // ── 1. BuildingHelper: GridSystem이 준비되면 즉시 생성 (1회)
         if (!_helperInitialized && GridSystem.Instance != null)
         {
-            _buildingHelper    = new BuildingHelper(GridSystem.Instance);
+            _buildingHelper = new BuildingHelper(GridSystem.Instance);
             _helperInitialized = true;
         }
 
@@ -176,7 +176,6 @@ public class PlayerInteractor : NetworkBehaviour
     {
         // 미완료 항목이 있으면 재시도 (BuildingSystem.Instance 타이밍 문제 대비)
         InitializeStageRefs();
-        Debug.Log($"[BuildMode] 진입 — helper={_helperInitialized}, listUI={_listUIInitialized}, B:종료 Tab:목록");
     }
 
     private void ExitBuildMode()
@@ -185,9 +184,7 @@ public class PlayerInteractor : NetworkBehaviour
         _cachedBuildingListUI?.SetVisible(false);   // 목록 UI 닫기
 
         Cursor.lockState = CursorLockMode.Locked;
-        Cursor.visible   = false;
-
-        Debug.Log("[BuildMode] 종료");
+        Cursor.visible = false;
     }
 
     // ─── 빌딩 모드 업데이트 ──────────────────────────────────────────────────
@@ -228,7 +225,7 @@ public class PlayerInteractor : NetworkBehaviour
         if (data == null) return;
 
         // Y=0 평면 교차로 커서 셀 결정 — 수학적으로 안정적이라 히스테리시스 불필요
-        Ray  ray = new Ray(cameraTransform.position, cameraTransform.forward);
+        Ray ray = new Ray(cameraTransform.position, cameraTransform.forward);
         bool hit = _buildingHelper.GetGridFromRay(ray, buildGroundLayer,
             out _, out int cursorX, out int cursorZ);
 
@@ -329,12 +326,15 @@ public class PlayerInteractor : NetworkBehaviour
         if (Physics.Raycast(ray, out RaycastHit blockHit, Mathf.Infinity, blockingLayer))
             blockDist = blockHit.distance;
 
-        // 💡 사격용 디버그 레이저 그리기 (빨간색) — Infinity 대신 500f 사용 (DrawRay에 Infinity 불가)
-        Debug.DrawRay(ray.origin, ray.direction * (float.IsInfinity(blockDist) ? 500f : blockDist), Color.red, 2f);
+#if UNITY_EDITOR
+        // 사격용 디버그 레이저 그리기 — 빌드에서는 제거 (GC Alloc 방지)
+        //Debug.DrawRay(ray.origin, ray.direction * (float.IsInfinity(blockDist) ? 500f : blockDist), Color.red, 2f);
 
-        // 환경/벽 등 일반 Physics 오브젝트 명중 로그
-        if (Physics.Raycast(ray, out RaycastHit hit, blockDist, shootableLayer))
-            Debug.Log($"[{hit.collider.name}] 명중!");
+        // 환경/벽 등 일반 Physics 오브젝트 명중 로그 — 빌드에서는 제거
+        // if (Physics.Raycast(ray, out RaycastHit hit, blockDist, shootableLayer))
+        //     Debug.Log($"[{hit.collider.name}] 명중!");
+
+#endif
 
         // 적은 CapsuleCollider가 없으므로 Ray-Capsule 수학 검사로 처리
         // blockDist로 캡을 걸어 지형/구조물 뒤 적은 판정 제외
@@ -355,19 +355,11 @@ public class PlayerInteractor : NetworkBehaviour
         if (closestEnemy != null)
         {
             float damage = isHeadshot ? currentWeaponDamage * headshotMultiplier : currentWeaponDamage;
+#if UNITY_EDITOR
             Debug.Log(isHeadshot ? $"[HEADSHOT] {damage} 데미지" : $"[Hit] {damage} 데미지");
+#endif
             closestEnemy.TakeDamage(damage);
         }
     }
 
-    // 💡 에디터 Scene 뷰에서 항상 레이캐스트 길이를 확인할 수 있게 해주는 기능
-    private void OnDrawGizmos()
-    {
-        if (cameraTransform == null) return;
-
-        // 상호작용 사거리 (초록색 구체와 선)
-        Gizmos.color = Color.green;
-        Gizmos.DrawRay(cameraTransform.position, cameraTransform.forward * interactDistance);
-        Gizmos.DrawWireSphere(cameraTransform.position + cameraTransform.forward * interactDistance, 0.1f);
-    }
 }

@@ -43,6 +43,9 @@ public class EnemyMother : NetworkBehaviour
     private Queue<Enemy> _pendingRemoves = new Queue<Enemy>();
     private Queue<Enemy> _pool = new Queue<Enemy>();
 
+    // 스폰 코루틴 WaitForSeconds 재사용 캐시 (호출마다 new 방지)
+    private WaitForSeconds _spawnStepWait;
+
     private TransformAccessArray _transformAccessArray;
     private NativeArray<Vector3> _currentPositions;
     private NativeArray<Quaternion> _currentRotations;
@@ -697,7 +700,7 @@ public class EnemyMother : NetworkBehaviour
     private IEnumerator SpawnEnemyLocal(int seed, int spawnCount)
     {
         UnityEngine.Random.InitState(seed);
-        WaitForSeconds wait01 = new WaitForSeconds(0.01f);
+        _spawnStepWait ??= new WaitForSeconds(0.01f);
 
         for (int i = 0; i < spawnCount; i++)
         {
@@ -716,7 +719,7 @@ public class EnemyMother : NetworkBehaviour
                 AddEnemy(simpleEnemy);
             }
 
-            yield return wait01;
+            yield return _spawnStepWait;
         }
     }
 

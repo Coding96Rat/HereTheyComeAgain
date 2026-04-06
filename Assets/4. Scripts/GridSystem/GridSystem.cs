@@ -13,9 +13,6 @@ public class GridSystem : MonoBehaviour
     [Tooltip("������ �ν��� ���̾ �����ϼ��� (��: Wall)")]
     public LayerMask obstacleLayer;
 
-    [Header("Debug Settings")]
-    public bool showGizmos = true;
-
     public static GridSystem Instance { get; private set; }
 
     public Vector3 MiddlePoint => _middlePoint;
@@ -136,20 +133,4 @@ public class GridSystem : MonoBehaviour
             _runtimeGrid[x, z] = occupied;
     }
 
-    private void OnDrawGizmosSelected()
-    {
-        if (!showGizmos) return;
-
-        // ���� �׸��带 �׸��� �ʰ�, �߾� ������ �������� ������ ��ü ���簢�� �ܰ����� ǥ��
-        Gizmos.color = Color.cyan; // ���� �� �絵�� ���� ����
-        Vector3 bl = GetBottomLeft();
-        Vector3 tl = bl + new Vector3(0, 0, _rows * _cellSize);
-        Vector3 br = bl + new Vector3(_columns * _cellSize, 0, 0);
-        Vector3 tr = bl + new Vector3(_columns * _cellSize, 0, _rows * _cellSize);
-
-        Gizmos.DrawLine(bl, tl);
-        Gizmos.DrawLine(tl, tr);
-        Gizmos.DrawLine(tr, br);
-        Gizmos.DrawLine(br, bl);
-    }
 }
