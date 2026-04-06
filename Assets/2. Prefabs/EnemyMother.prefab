@@ -57,14 +57,14 @@ MonoBehaviour:
   spawnRadius: 46.1
   separationRadius: 1.5
   separationWeight: 2
-  globalEnemySpeed: 15
   globalRotationSpeed: 720
   cellSize: 2
-  maxWeightTolerance: 3
+  motherIndex: -1
   injectedStairs: []
-  zombieMesh: {fileID: 4300000, guid: c7826500f54f6484ea03bcbb7fdcc781, type: 2}
-  zombieMaterial: {fileID: 2100000, guid: cd4fa0b13f269a647b44d3e9a930aa17, type: 2}
   Enemies: []
+  _wallDetectionLayer:
+    serializedVersion: 2
+    m_Bits: 1024
 --- !u!114 &-2605944741344936375
 MonoBehaviour:
   m_ObjectHideFlags: 0

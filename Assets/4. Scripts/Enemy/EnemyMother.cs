@@ -69,6 +69,15 @@ public class EnemyMother : NetworkBehaviour
     private NativeArray<float>     _isWalkingBuffer;
     private NativeArray<float>     _timeOffsetBuffer;
 
+    // 구조물 감지용 — EnemyMovementJob에 NativeArray로 전달 (매 프레임 갱신)
+    private NativeArray<Vector3> _structurePositions; // 최대 64개 구조물
+    private int _activeStructureCount;
+    private const int MaxStructures = 64;
+
+    // 전방 레이캐스트 파라미터 — 건물·벽 레이어 포함 (Inspector에서 _wallDetectionLayer 설정)
+    [SerializeField] private LayerMask _wallDetectionLayer;
+    private QueryParameters _forwardQueryParams;
+
     // GPU 렌더링 변수
     private MaterialPropertyBlock _mpb;
     private readonly int _isWalkingHash = Shader.PropertyToID("_IsWalking");
@@ -324,9 +333,10 @@ public class EnemyMother : NetworkBehaviour
         if (_activeTargetPositions.IsCreated) _activeTargetPositions.Dispose();
         if (_speeds.IsCreated) _speeds.Dispose();
         if (_spatialGrid.IsCreated) _spatialGrid.Dispose();
-        if (_matricesBuffer.IsCreated)   _matricesBuffer.Dispose();
-        if (_isWalkingBuffer.IsCreated)  _isWalkingBuffer.Dispose();
-        if (_timeOffsetBuffer.IsCreated) _timeOffsetBuffer.Dispose();
+        if (_matricesBuffer.IsCreated)      _matricesBuffer.Dispose();
+        if (_isWalkingBuffer.IsCreated)     _isWalkingBuffer.Dispose();
+        if (_timeOffsetBuffer.IsCreated)    _timeOffsetBuffer.Dispose();
+        if (_structurePositions.IsCreated)  _structurePositions.Dispose();
     }
 
     public override void OnStartNetwork()
@@ -354,9 +364,10 @@ public class EnemyMother : NetworkBehaviour
         _speeds = new NativeArray<float>(maxActiveEnemies, Allocator.Persistent);
 
         // P2: 렌더링 빌드 버퍼 (Worker Thread에서 TRS 계산 결과를 받는 저장소)
-        _matricesBuffer  = new NativeArray<Matrix4x4>(maxActiveEnemies, Allocator.Persistent);
-        _isWalkingBuffer = new NativeArray<float>(maxActiveEnemies, Allocator.Persistent);
-        _timeOffsetBuffer = new NativeArray<float>(maxActiveEnemies, Allocator.Persistent);
+        _matricesBuffer    = new NativeArray<Matrix4x4>(maxActiveEnemies, Allocator.Persistent);
+        _isWalkingBuffer   = new NativeArray<float>(maxActiveEnemies, Allocator.Persistent);
+        _timeOffsetBuffer  = new NativeArray<float>(maxActiveEnemies, Allocator.Persistent);
+        _structurePositions = new NativeArray<Vector3>(MaxStructures, Allocator.Persistent);
 
         if (enemyPrefab != null && enemyPrefab.TryGetComponent(out Enemy prefabEnemy) && prefabEnemy.data != null)
         {
@@ -368,7 +379,11 @@ public class EnemyMother : NetworkBehaviour
             Debug.LogWarning($"[EnemyMother] {name}: enemyPrefab에 Enemy 컴포넌트 또는 EnemyDataSO가 없습니다.");
         }
 
-        _groundQueryParams = new QueryParameters(LayerMask.GetMask("Ground"), false, QueryTriggerInteraction.Ignore, false);
+        _groundQueryParams  = new QueryParameters(LayerMask.GetMask("Ground"), false, QueryTriggerInteraction.Ignore, false);
+        // 전방 레이캐스트 — Inspector에서 설정한 wallDetectionLayer (건물 포함) 사용
+        // 미설정 시 Ground만 사용 (기존 동작 유지)
+        int fwdMask = _wallDetectionLayer.value != 0 ? _wallDetectionLayer.value : LayerMask.GetMask("Ground");
+        _forwardQueryParams = new QueryParameters(fwdMask, false, QueryTriggerInteraction.Ignore, false);
         _mpb = new MaterialPropertyBlock();
 
         int maxBatches = Mathf.CeilToInt((float)maxActiveEnemies / 1023f) + 1;
@@ -434,6 +449,56 @@ public class EnemyMother : NetworkBehaviour
         _movementJobHandle.Complete();
         _hashJobHandle.Complete();
 
+        // 2a. 플레이어 구조물 근접 대미지 (서버만)
+        // 공간 해시 그리드(_spatialGrid, 이전 프레임 완료)로 O(structures × cells) 조회
+        // → 구조물당 최대 MaxDamagePerSecond 캡으로 DPS 일정 유지
+        if (IsServerInitialized && PlacedStructure.All.Count > 0 && Enemies.Count > 0)
+        {
+            float dt          = Time.deltaTime;
+            float dmgPerSec   = PlacedStructure.DamagePerEnemyPerSecond;
+            float maxDmg      = PlacedStructure.MaxDamagePerSecond * dt;
+            // 대미지 반경: 건물 중심 기준 최대 4m (반폭 최대 2m + 갭 최대 2m)
+            // 이전 4f(2m)는 3m 큐브(반폭1.5) + 갭(1.2) = 2.7m 로 범위 밖이어서 데미지 0이었음
+            float meleeSqr    = 16f; // 4m 반경²
+
+            for (int s = 0; s < PlacedStructure.All.Count; s++)
+            {
+                PlacedStructure str = PlacedStructure.All[s];
+                if (str == null) continue;
+
+                Vector3 sp      = str.transform.position;
+                float totalDmg  = 0f;
+                bool  done      = false;
+
+                // 3×3 셀 탐색 — 공간 해시로 인접 적 빠르게 찾기
+                for (int cx = -1; cx <= 1 && !done; cx++)
+                {
+                    for (int cz = -1; cz <= 1 && !done; cz++)
+                    {
+                        int hash = HashPositionsJob.GetGridHash(
+                            new Unity.Mathematics.float3(sp.x + cx * cellSize, 0f, sp.z + cz * cellSize), cellSize);
+
+                        if (_spatialGrid.TryGetFirstValue(hash, out int eIdx, out var it))
+                        {
+                            do
+                            {
+                                Vector3 ep  = _currentPositions[eIdx];
+                                float   ddx = ep.x - sp.x;
+                                float   ddz = ep.z - sp.z;
+                                if (ddx * ddx + ddz * ddz < meleeSqr)
+                                {
+                                    totalDmg += dmgPerSec * dt;
+                                    if (totalDmg >= maxDmg) { done = true; break; }
+                                }
+                            }
+                            while (_spatialGrid.TryGetNextValue(out eIdx, ref it));
+                        }
+                    }
+                }
+                if (totalDmg > 0f) str.TakeDamage(totalDmg);
+            }
+        }
+
         // 2. 확정된 결과로 변경 처리
         ProcessPendingChanges();
 
@@ -462,6 +527,15 @@ public class EnemyMother : NetworkBehaviour
                 _activeTargetPositions[i] = ValidTargets[i].position;
         }
 
+        // 3b. 구조물 위치 배열 갱신 (Job에 ReadOnly로 넘김 — 매 프레임 갱신, GC Alloc 없음)
+        _activeStructureCount = 0;
+        for (int i = 0; i < PlacedStructure.All.Count && _activeStructureCount < MaxStructures; i++)
+        {
+            var s = PlacedStructure.All[i];
+            if (s != null && s.gameObject.activeInHierarchy)
+                _structurePositions[_activeStructureCount++] = s.transform.position;
+        }
+
         _spatialGrid.Clear();
 
         // 4. Transform 복사 Job
@@ -484,8 +558,9 @@ public class EnemyMother : NetworkBehaviour
         {
             RaycastSetupJob setupJob = new RaycastSetupJob
             {
-                Commands        = _raycastCommands,
-                DownQueryParams = _groundQueryParams
+                Commands         = _raycastCommands,
+                DownQueryParams  = _groundQueryParams,
+                ForwardQueryParams = _forwardQueryParams
             };
             // 활성 적 수만큼만 Raycast 처리 — 전체 배열(최대 8000) 대신 실제 사용 슬라이스만 전달
             int activeRayCount      = Enemies.Count * 2;
@@ -540,10 +615,17 @@ public class EnemyMother : NetworkBehaviour
             FlowField1 = ff1,
             FlowField2 = ff2,
             FlowField3 = ff3,
-            GridCols = _ffs != null ? _ffs.GridCols : 0,
-            GridRows = _ffs != null ? _ffs.GridRows : 0,
+            GridCols   = _ffs != null ? _ffs.GridCols  : 0,
+            GridRows   = _ffs != null ? _ffs.GridRows  : 0,
             AiCellSize = _ffs != null ? _ffs.aiCellSize : 2f,
-            BottomLeft = _ffs != null ? _ffs.BottomLeft : Vector3.zero
+            BottomLeft = _ffs != null ? _ffs.BottomLeft : Vector3.zero,
+            // cost==255 셀 진입 차단 — 영구 장애물 통과 방지 (물리 연산 0회)
+            CostField  = (_ffs != null && _ffs.CostField.IsCreated) ? _ffs.CostField : default,
+            // 구조물 감지 — 탐지 반경 내 플레이어 구조물 방향으로 이동 방향 전환
+            StructurePositions      = _structurePositions,
+            StructureCount          = _activeStructureCount,
+            StructureDetectRangeSqr = (_ffs != null ? _ffs.aiCellSize * 4f : 8f) *
+                                      (_ffs != null ? _ffs.aiCellSize * 4f : 8f)  // 4셀 반경²
         };
 
         _movementJobHandle = moveJob.Schedule(_transformAccessArray, combinedHandle);

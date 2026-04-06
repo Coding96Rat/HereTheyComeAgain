@@ -1,4 +1,4 @@
-﻿using Unity.Burst;
+using Unity.Burst;
 using Unity.Collections;
 using Unity.Mathematics;
 using UnityEngine;
@@ -33,6 +33,18 @@ public struct EnemyMovementJob : IJobParallelForTransform
     [ReadOnly] public float AiCellSize;
     [ReadOnly] public Vector3 BottomLeft;
 
+    // ─── 건물 통과 방지 ───────────────────────────────────────────────────────
+    // FlowField CostField(cost==255 셀)로 진입 차단 — 물리 연산 0회, 배열 인덱싱만 사용
+    // 전방 레이캐스트(fwdHit)가 서브-셀 정밀도 슬라이딩을 담당하므로 이중 방어막 구성
+    [ReadOnly] public NativeArray<byte> CostField;
+
+    // ─── 플레이어 구조물 감지 ─────────────────────────────────────────────────
+    // 자신의 셀 반경 내에 구조물이 있으면 플레이어 대신 구조물 방향으로 이동
+    // 순수 거리·방향 연산 (sqrt 없이 dot²으로 방향 판별)
+    [ReadOnly] public NativeArray<Vector3> StructurePositions;
+    [ReadOnly] public int StructureCount;
+    [ReadOnly] public float StructureDetectRangeSqr; // (AiCellSize * DetectCellRadius)²
+
     public void Execute(int index, TransformAccess transform)
     {
         Vector3 currentPos = transform.position;
@@ -42,12 +54,13 @@ public struct EnemyMovementJob : IJobParallelForTransform
         float dt = DeltaTime;
 
         RaycastHit downHit = RaycastHits[index * 2];
-        RaycastHit fwdHit = RaycastHits[index * 2 + 1];
+        RaycastHit fwdHit  = RaycastHits[index * 2 + 1];
 
         Vector3 toTarget = targetPos - currentPos;
         toTarget.y = 0f;
         float distSqr = toTarget.sqrMagnitude;
 
+        // ── 1. FlowField 기반 이동 방향 결정 ──────────────────────────────────
         Vector3 desiredDir = Vector3.forward;
 
         if (distSqr < 2.25f && distSqr > 0.001f)
@@ -64,32 +77,70 @@ public struct EnemyMovementJob : IJobParallelForTransform
                 int flatIdx = z * GridCols + x;
                 Vector3 flowDir = Vector3.zero;
 
-                if (tIdx == 0 && FlowField0.IsCreated) flowDir = FlowField0[flatIdx];
+                if      (tIdx == 0 && FlowField0.IsCreated) flowDir = FlowField0[flatIdx];
                 else if (tIdx == 1 && FlowField1.IsCreated) flowDir = FlowField1[flatIdx];
                 else if (tIdx == 2 && FlowField2.IsCreated) flowDir = FlowField2[flatIdx];
                 else if (tIdx == 3 && FlowField3.IsCreated) flowDir = FlowField3[flatIdx];
 
-                if (flowDir.sqrMagnitude > 0.01f) desiredDir = flowDir;
-                else desiredDir = distSqr > 0.001f ? toTarget.normalized : Vector3.forward;
+                if      (flowDir.sqrMagnitude > 0.01f) desiredDir = flowDir;
+                else if (distSqr > 0.001f)              desiredDir = toTarget.normalized;
             }
             else
             {
-                desiredDir = distSqr > 0.001f ? toTarget.normalized : Vector3.forward;
+                if (distSqr > 0.001f) desiredDir = toTarget.normalized;
             }
         }
 
+        // ── 2. 주변 플레이어 구조물 감지 → 경로 상 가장 가까운 구조물 우선 타겟 ──
+        // 탐지 방법: 순수 거리² + 방향 내적² (sqrt 없이 방향 판별)
+        // 조건: 탐지 반경 내 + 플레이어 방향과 동일 반구 (dot > 0)
+        if (StructureCount > 0 && distSqr > 2.25f)
+        {
+            float nearestSqr = StructureDetectRangeSqr;
+            int   nearestIdx = -1;
+
+            for (int s = 0; s < StructureCount; s++)
+            {
+                Vector3 sp  = StructurePositions[s];
+                float   sdx = sp.x - currentPos.x;
+                float   sdz = sp.z - currentPos.z;
+                float   ssqr = sdx * sdx + sdz * sdz;
+
+                if (ssqr >= nearestSqr) continue;
+
+                // 구조물이 플레이어 방향과 같은 쪽인지 내적으로 판별 (sqrt 불필요)
+                float dotFwd = sdx * toTarget.x + sdz * toTarget.z;
+                if (dotFwd <= 0f) continue; // 뒤쪽 구조물은 무시
+
+                nearestSqr = ssqr;
+                nearestIdx = s;
+            }
+
+            if (nearestIdx >= 0)
+            {
+                Vector3 sp = StructurePositions[nearestIdx];
+                Vector3 toStruct = new Vector3(sp.x - currentPos.x, 0, sp.z - currentPos.z);
+                if (toStruct.sqrMagnitude > 0.001f)
+                    desiredDir = (Vector3)math.normalize(toStruct);
+                // distSqr는 플레이어 기준이므로 구조물이 대상일 때 속도 차단 기준 재사용
+            }
+        }
+
+        // ── 3. 방향 흔들림(sway) ─────────────────────────────────────────────
         if (desiredDir.sqrMagnitude > 0.001f && distSqr > 10.0f)
         {
             Vector3 rightVector = new Vector3(desiredDir.z, 0, -desiredDir.x);
             float sway = math.sin(ElapsedTime * 2.0f + index * 7.13f) * 0.1f;
             desiredDir += rightVector * sway;
-            desiredDir = (Vector3)math.normalize(desiredDir);
+            desiredDir  = (Vector3)math.normalize(desiredDir);
         }
 
-        float trueGroundY = downHit.colliderEntityId != 0 ? downHit.point.y : -999f;
+        float trueGroundY  = downHit.colliderEntityId != 0 ? downHit.point.y : -999f;
         float targetGroundY = trueGroundY;
-        Vector3 separation = Vector3.zero;
-        float sepRadiusSqr = SeparationRadius * SeparationRadius;
+
+        // ── 4. 분리력 ─────────────────────────────────────────────────────────
+        Vector3 separation  = Vector3.zero;
+        float   sepRadiusSqr = SeparationRadius * SeparationRadius;
 
         for (int cx = -1; cx <= 1; cx++)
         {
@@ -104,13 +155,12 @@ public struct EnemyMovementJob : IJobParallelForTransform
                     do
                     {
                         if (otherIdx == index) continue;
-
                         checkCount++;
                         if (checkCount > 16) break;
 
-                        Vector3 otherPos = AllEnemyPositions[otherIdx];
-                        Vector3 diff = currentPos - otherPos;
-                        float sqrDistXZ = diff.x * diff.x + diff.z * diff.z;
+                        Vector3 otherPos    = AllEnemyPositions[otherIdx];
+                        Vector3 diff        = currentPos - otherPos;
+                        float   sqrDistXZ   = diff.x * diff.x + diff.z * diff.z;
 
                         if (sqrDistXZ < sepRadiusSqr && math.abs(diff.y) < 1.5f && sqrDistXZ > 0.001f)
                         {
@@ -125,87 +175,96 @@ public struct EnemyMovementJob : IJobParallelForTransform
 
         if (separation.sqrMagnitude > 4.0f) separation = separation.normalized * 2.0f;
 
-        float currentYVel = YVelocities[index];
-        float currentSpeed = (distSqr < 2.0f) ? 0f : Speeds[index];
+        float currentYVel   = YVelocities[index];
+        float currentSpeed  = (distSqr < 2.0f) ? 0f : Speeds[index];
 
         Vector3 xzVelocity = (desiredDir * currentSpeed) + (separation * SeparationWeight);
 
-        // 탑 쌓기 방지: 타겟 근처(3m 이내)에서 접선 방향 힘을 추가해 적들이 링 형태로 둘러쌈
-        // 분리 벡터의 방향을 기준으로 CW/CCW 중 분리 힘과 맞는 방향을 선택
+        // 탑 쌓기 방지 — 타겟 3m 이내에서 접선 힘 추가
         if (distSqr > 0.1f && distSqr < 9.0f)
         {
-            float dist = math.sqrt(distSqr);
+            float dist     = math.sqrt(distSqr);
             Vector3 radial = new Vector3(toTarget.x / dist, 0f, toTarget.z / dist);
-            Vector3 tangentCW = new Vector3(radial.z, 0f, -radial.x);
-            Vector3 tangentCCW = new Vector3(-radial.z, 0f, radial.x);
-            float cwDot = separation.x * tangentCW.x + separation.z * tangentCW.z;
+            Vector3 tangentCW  = new Vector3(radial.z,  0f, -radial.x);
+            Vector3 tangentCCW = new Vector3(-radial.z, 0f,  radial.x);
+            float cwDot  = separation.x * tangentCW.x  + separation.z * tangentCW.z;
             float ccwDot = separation.x * tangentCCW.x + separation.z * tangentCCW.z;
-            Vector3 chosenTangent = (cwDot >= ccwDot) ? tangentCW : tangentCCW;
-            float tangentStrength = math.max(0f, 1f - dist / 3.0f) * Speeds[index] * 0.8f;
+            Vector3 chosenTangent  = (cwDot >= ccwDot) ? tangentCW : tangentCCW;
+            float   tangentStrength = math.max(0f, 1f - dist / 3.0f) * Speeds[index] * 0.8f;
             xzVelocity.x += chosenTangent.x * tangentStrength;
             xzVelocity.z += chosenTangent.z * tangentStrength;
         }
 
-        if (fwdHit.colliderEntityId != 0 && fwdHit.distance < 1.2f)
+        // ── 5. 전방 레이캐스트 슬라이딩 (서브-셀 정밀도 장애물 회피) ──────────
+        // 전방 레이캐스트 슬라이딩
+        // stopDist: 이 거리 이하 진입 시 벽쪽 속도 성분 제거 (갭 결정)
+        // pushDist: 이 거리 이하면 위치도 밀어냄 (최종 최소 갭)
+        const float stopDist = 0.65f;
+        const float pushDist = 0.20f;
+        if (fwdHit.colliderEntityId != 0 && fwdHit.distance < stopDist)
         {
             if (fwdHit.normal.y < 0.25f)
             {
                 float dotVelocity = Vector3.Dot(xzVelocity, fwdHit.normal);
                 if (dotVelocity < 0) xzVelocity -= fwdHit.normal * dotVelocity;
 
-                float pushThreshold = 0.6f;
-                if (fwdHit.distance < pushThreshold)
+                if (fwdHit.distance < pushDist)
                 {
-                    Vector3 pushOut = fwdHit.normal * (pushThreshold - fwdHit.distance);
+                    Vector3 pushOut = fwdHit.normal * (pushDist - fwdHit.distance);
                     pushOut.y = 0;
                     currentPos += pushOut;
                 }
             }
         }
 
-        // 💡 [복구됨] 완벽한 추락 방지 및 오르막/내리막 물리 연산
+        // ── 6. Y축 물리 (오르막 / 내리막 / 추락) ────────────────────────────
         if (targetGroundY != -999f)
         {
             float yDiff = targetGroundY - currentPos.y;
 
-            if (yDiff > 0.1f) // 오르막
+            if (yDiff > 0.1f)
             {
                 currentPos.y += math.min(yDiff, Speeds[index] * 1.5f * dt);
                 currentYVel = 0f;
             }
-            else if (yDiff < -0.1f) // 내리막 또는 추락
+            else if (yDiff < -0.1f)
             {
                 currentYVel -= Gravity * dt;
                 float nextY = currentPos.y + currentYVel * dt;
-
-                // 다음 프레임 위치가 지형보다 낮아지면 지형 높이에 강제 고정
-                if (nextY < targetGroundY)
-                {
-                    currentPos.y = targetGroundY;
-                    currentYVel = 0f;
-                }
-                else
-                {
-                    currentPos.y = nextY;
-                }
+                if (nextY < targetGroundY) { currentPos.y = targetGroundY; currentYVel = 0f; }
+                else                         currentPos.y = nextY;
             }
-            else // 평지
+            else
             {
                 currentPos.y = targetGroundY;
-                currentYVel = 0f;
+                currentYVel  = 0f;
             }
         }
         else
         {
-            // 바닥을 못 찾았을 때 공중부양 방지 (절벽 추락)
             currentYVel -= Gravity * dt;
             currentPos.y += currentYVel * dt;
         }
 
-        // 최종 방어선: 어떤 이유로든 현재 Y가 땅보다 낮아지면 즉시 복구
         if (targetGroundY != -999f && currentPos.y < targetGroundY)
-        {
             currentPos.y = targetGroundY;
+
+        // ── 7. CostField cost==255 차단 (FlowField Bake에 포함된 영구 장애물) ──
+        // X/Z 독립 검사로 벽 슬라이딩 허용. 물리 연산 0회 — 배열 인덱싱만 사용.
+        if (CostField.IsCreated && GridCols > 0)
+        {
+            float dtx = xzVelocity.x * dt;
+            float dtz = xzVelocity.z * dt;
+
+            int nx = (int)math.floor((currentPos.x + dtx - BottomLeft.x) / AiCellSize);
+            int nz = (int)math.floor((currentPos.z           - BottomLeft.z) / AiCellSize);
+            if (nx >= 0 && nx < GridCols && nz >= 0 && nz < GridRows && CostField[nz * GridCols + nx] == 255)
+                xzVelocity.x = 0f;
+
+            int nx2 = (int)math.floor((currentPos.x           - BottomLeft.x) / AiCellSize);
+            int nz2 = (int)math.floor((currentPos.z + dtz - BottomLeft.z) / AiCellSize);
+            if (nx2 >= 0 && nx2 < GridCols && nz2 >= 0 && nz2 < GridRows && CostField[nz2 * GridCols + nx2] == 255)
+                xzVelocity.z = 0f;
         }
 
         currentPos.x += xzVelocity.x * dt;
@@ -217,9 +276,9 @@ public struct EnemyMovementJob : IJobParallelForTransform
             transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, RotationSpeed * dt);
         }
 
-        AnimStates[index] = (currentSpeed < 0.2f) ? 2 : 1;
-        YVelocities[index] = currentYVel;
-        Rotations[index] = transform.rotation; // 💡 계산된 최종 회전값을 배열에 담아 메인 스레드로 넘깁니다
-        transform.position = currentPos;
+        AnimStates[index]   = (currentSpeed < 0.2f) ? 2 : 1;
+        YVelocities[index]  = currentYVel;
+        Rotations[index]    = transform.rotation;
+        transform.position  = currentPos;
     }
 }

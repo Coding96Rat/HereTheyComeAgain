@@ -14,7 +14,8 @@ GameObject:
   - component: {fileID: 982515109382902076}
   - component: {fileID: 6765893413472109162}
   - component: {fileID: 1000579253964474633}
-  m_Layer: 0
+  - component: {fileID: 5073790340783958032}
+  m_Layer: 10
   m_Name: Cube
   m_TagString: Untagged
   m_Icon: {fileID: 0}
@@ -144,7 +145,7 @@ MonoBehaviour:
   _initializeOrder: 0
   _preventDespawnOnDisconnect: 0
   _defaultDespawnType: 0
-  _initializedTimestamp: -8584263360492568765
+  _initializedTimestamp: -8584261560091700494
   NetworkObserver: {fileID: 0}
   _enablePrediction: 0
   _predictionType: 0
@@ -184,3 +185,16 @@ MonoBehaviour:
   _componentIndexCache: 0
   _addedNetworkObject: {fileID: 6765893413472109162}
   _networkObjectCache: {fileID: 6765893413472109162}
+--- !u!114 &5073790340783958032
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 3847878763289558175}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 1e62cf28f59d2bf4284bb5a3ecf12027, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::PlacedStructure
+  maxHealth: 10000

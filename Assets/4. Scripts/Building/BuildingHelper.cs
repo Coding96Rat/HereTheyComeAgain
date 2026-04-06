@@ -102,8 +102,12 @@ public class BuildingHelper
 
         UnityEngine.Bounds bounds = GetPrefabLocalBounds(data.prefab);
 
+        // Y 보정: bounds.min.y 는 메시 최하단 (Scale Y 반영).
+        // 건물 바닥(min.y)이 지표면(y=0)에 딱 닿도록 -min.y 만큼 올림.
+        float groundY = bounds.min.y < 0f ? -bounds.min.y : 0f;
+
         return new UnityEngine.Vector3(targetCX - bounds.center.x,
-                                       0f,
+                                       groundY,
                                        targetCZ - bounds.center.z);
     }
 

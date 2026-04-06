@@ -285,13 +285,14 @@ public class FlowFieldSystem : MonoBehaviour
 
         if (showObstacleBlocks && _savedCostField != null && _savedCostField.Length > 0)
         {
-            bool useRuntime = Application.isPlaying && _costField.IsCreated;
+            // 플레이 중에는 저장된 Bake 데이터만 표시 (런타임 동적 마킹 셀 제외)
+            // → PlacedStructure가 cost=255로 마킹한 셀이 빨간색으로 덮이는 현상 방지
             for (int x = 0; x < _savedCols; x++)
             {
                 for (int z = 0; z < _savedRows; z++)
                 {
                     int flatIndex = z * _savedCols + x;
-                    byte cost = useRuntime ? _costField[flatIndex] : _savedCostField[flatIndex];
+                    byte cost = _savedCostField[flatIndex]; // 항상 baked 데이터 사용
 
                     if (cost == 255) { Gizmos.color = new Color(1f, 0f, 0f, 0.5f); Gizmos.DrawCube(_savedBottomLeft + new Vector3(x * aiCellSize, 0, z * aiCellSize) + centerOffset, cubeSize); }
                     else if (cost == 5) { Gizmos.color = new Color(1f, 1f, 0f, 0.3f); Gizmos.DrawCube(_savedBottomLeft + new Vector3(x * aiCellSize, 0, z * aiCellSize) + centerOffset, cubeSize); }
@@ -323,4 +324,36 @@ public class FlowFieldSystem : MonoBehaviour
     public int GridCols => _cols;
     public int GridRows => _rows;
     public Vector3 BottomLeft => _bottomLeft;
+
+    // ─── PlacedStructure / EnemyMovementJob 연동용 공개 API ──────────────────
+
+    /// <summary>
+    /// EnemyMovementJob에 ReadOnly로 넘기기 위한 CostField 노출.
+    /// </summary>
+    public NativeArray<byte> CostField => _costField;
+
+    /// <summary>
+    /// 특정 플랫 인덱스의 비용을 직접 쓴다 (PlacedStructure 등록/해제용).
+    /// Job이 읽고 있을 수 있으므로 완료 대기 후 작성.
+    /// </summary>
+    public bool TrySetCellCost(int flatIdx, byte cost)
+    {
+        if (!_costField.IsCreated || flatIdx < 0 || flatIdx >= _costField.Length) return false;
+        _globalReadersHandle.Complete();
+        if (_perPlayerHandles != null)
+            for (int i = 0; i < _perPlayerHandles.Length; i++) _perPlayerHandles[i].Complete();
+        _costField[flatIdx] = cost;
+        // FlowField 강제 재계산
+        if (_lastPlayerCells != null)
+            for (int i = 0; i < _lastPlayerCells.Length; i++)
+                _lastPlayerCells[i] = new int2(int.MinValue, int.MinValue);
+        return true;
+    }
+
+    public int2 WorldToCell(Vector3 worldPos) => new int2(
+        Mathf.FloorToInt((worldPos.x - _bottomLeft.x) / aiCellSize),
+        Mathf.FloorToInt((worldPos.z - _bottomLeft.z) / aiCellSize));
+
+    public int CellToFlat(int2 cell) => cell.y * _cols + cell.x;
+    public bool IsCellValid(int2 cell) => cell.x >= 0 && cell.x < _cols && cell.y >= 0 && cell.y < _rows;
 }
