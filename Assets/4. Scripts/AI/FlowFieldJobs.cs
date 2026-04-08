@@ -27,9 +27,9 @@ public struct IntegrationFieldJob : IJob
         int targetIdx = TargetCell.y * GridCols + TargetCell.x;
         IntegrationField[targetIdx] = 0;
 
-        // 구조물 타겟(cost=255)이면 연결된 모든 구조물 셀을 flood-fill로 탐색해
+        // 구조물 타겟(cost >= 254)이면 연결된 모든 구조물 셀을 flood-fill로 탐색해
         // 전부 integration=0으로 seed — 어느 방향에서 오는 적도 동등한 거리로 접근 가능
-        if (CostField[targetIdx] == 255)
+        if (CostField[targetIdx] >= 254)
         {
             NativeQueue<int2> structureFill = new NativeQueue<int2>(Allocator.Temp);
             structureFill.Enqueue(TargetCell);
@@ -71,7 +71,7 @@ public struct IntegrationFieldJob : IJob
         int ny = curr.y + dy;
         if (nx < 0 || nx >= GridCols || ny < 0 || ny >= GridRows) return;
         int nIdx = ny * GridCols + nx;
-        if (CostField[nIdx] != 255) return;           // 구조물 셀만 탐색
+        if (CostField[nIdx] < 254) return;           // 구조물/벽 셀만 탐색
         if (IntegrationField[nIdx] != int.MaxValue) return; // 이미 방문
         IntegrationField[nIdx] = 0;
         structureQueue.Enqueue(new int2(nx, ny));
@@ -85,11 +85,11 @@ public struct IntegrationFieldJob : IJob
 
         int nIdx = ny * GridCols + nx;
         byte nCostField = CostField[nIdx];
-        if (nCostField == 255) return;
+        if (nCostField >= 254) return;
 
         if (dx != 0 && dy != 0)
         {
-            if (CostField[curr.y * GridCols + nx] == 255 || CostField[ny * GridCols + curr.x] == 255) return;
+            if (CostField[curr.y * GridCols + nx] >= 254 || CostField[ny * GridCols + curr.x] >= 254) return;
         }
 
         // 언덕(Cost)이 높을수록 가중치를 부여해 우회 경로를 생성
@@ -125,7 +125,7 @@ public struct VectorFieldJob : IJobParallelFor
         Vector3 bfsDir = Vector3.zero;
 
         // 벽 탈출 구명줄 로직
-        if (CostField[index] == 255 || currentCost == int.MaxValue)
+        if (CostField[index] >= 254 || currentCost == int.MaxValue)
         {
             int minCost = int.MaxValue;
             AddEscapeDirection(cx, cz, 0, 1, ref minCost, ref bfsDir);
@@ -179,7 +179,7 @@ public struct VectorFieldJob : IJobParallelFor
         if (nx < 0 || nx >= GridCols || nz < 0 || nz >= GridRows) return;
 
         int nIdx = nz * GridCols + nx;
-        if (CostField[nIdx] == 255) return;
+        if (CostField[nIdx] >= 254) return;
 
         int nCost = IntegrationField[nIdx];
         if (nCost < currentCost)
@@ -197,7 +197,7 @@ public struct VectorFieldJob : IJobParallelFor
         if (nx < 0 || nx >= GridCols || nz < 0 || nz >= GridRows) return;
 
         int nIdx = nz * GridCols + nx;
-        if (CostField[nIdx] != 255 && IntegrationField[nIdx] < minCost)
+        if (CostField[nIdx] < 254 && IntegrationField[nIdx] < minCost)
         {
             minCost = IntegrationField[nIdx];
             escapeDir = new Vector3(dx, 0, dz);

@@ -33,20 +33,13 @@ public struct EnemyMovementJob : IJobParallelForTransform
     [ReadOnly] public float AiCellSize;
     [ReadOnly] public Vector3 BottomLeft;
 
-    // ─── 건물 통과 방지 ───────────────────────────────────────────────────────
-    // FlowField CostField(cost==255 셀)로 진입 차단 — 물리 연산 0회, 배열 인덱싱만 사용
-    // 전방 레이캐스트(fwdHit)가 서브-셀 정밀도 슬라이딩을 담당하므로 이중 방어막 구성
     [ReadOnly] public NativeArray<byte> CostField;
 
-    // ─── 플레이어 구조물 감지 ─────────────────────────────────────────────────
-    // 자신의 셀 반경 내에 구조물이 있으면 플레이어 대신 구조물 방향으로 이동
-    // 순수 거리·방향 연산 (sqrt 없이 dot²으로 방향 판별)
     [ReadOnly] public NativeArray<Vector3> StructurePositions;
-    [ReadOnly] public NativeArray<float>   StructureHalfExtents; // 구조물별 콜라이더 반지름 (표면 정밀 정지용)
+    [ReadOnly] public NativeArray<Vector3> StructureExtents; // AABB 사각형 크기 데이터
     [ReadOnly] public int StructureCount;
-    [ReadOnly] public float StructureDetectRangeSqr; // (AiCellSize * DetectCellRadius)²
+    [ReadOnly] public float StructureDetectRangeSqr;
 
-    // Attack 상태에서 플레이어로 커밋된 적의 구조물 감지 억제 (1 = 억제)
     [ReadOnly] public NativeArray<byte> SuppressStructureDetection;
 
     public void Execute(int index, TransformAccess transform)
@@ -59,7 +52,7 @@ public struct EnemyMovementJob : IJobParallelForTransform
         float dt = DeltaTime;
 
         RaycastHit downHit = RaycastHits[index * 2];
-        RaycastHit fwdHit  = RaycastHits[index * 2 + 1];
+        RaycastHit fwdHit = RaycastHits[index * 2 + 1];
 
         Vector3 toTarget = targetPos - currentPos;
         toTarget.y = 0f;
@@ -82,13 +75,18 @@ public struct EnemyMovementJob : IJobParallelForTransform
                 int flatIdx = z * GridCols + x;
                 Vector3 flowDir = Vector3.zero;
 
-                if      (tIdx == 0 && FlowField0.IsCreated) flowDir = FlowField0[flatIdx];
+                if (tIdx == 0 && FlowField0.IsCreated) flowDir = FlowField0[flatIdx];
                 else if (tIdx == 1 && FlowField1.IsCreated) flowDir = FlowField1[flatIdx];
                 else if (tIdx == 2 && FlowField2.IsCreated) flowDir = FlowField2[flatIdx];
                 else if (tIdx == 3 && FlowField3.IsCreated) flowDir = FlowField3[flatIdx];
 
-                if      (flowDir.sqrMagnitude > 0.01f) desiredDir = flowDir;
-                else if (distSqr > 0.001f)              desiredDir = toTarget.normalized;
+                // 💡 [버그 2 해결] 플레이어 타겟팅 중 254(구조물)를 밟으면 Escape 무시 후 직진
+                if (CostField.IsCreated && CostField[flatIdx] == 254 && SuppressStructureDetection[index] == 1)
+                {
+                    desiredDir = toTarget.normalized;
+                }
+                else if (flowDir.sqrMagnitude > 0.01f) desiredDir = flowDir;
+                else if (distSqr > 0.001f) desiredDir = toTarget.normalized;
             }
             else
             {
@@ -96,27 +94,23 @@ public struct EnemyMovementJob : IJobParallelForTransform
             }
         }
 
-        // ── 2. 주변 플레이어 구조물 감지 → 경로 상 가장 가까운 구조물 우선 타겟 ──
-        // Attack 상태에서 플레이어를 추적 중인 적은 구조물 감지를 억제 (버그 2 수정)
-        // 탐지 방법: 순수 거리² + 방향 내적² (sqrt 없이 방향 판별)
-        // 조건: 탐지 반경 내 + 플레이어 방향과 동일 반구 (dot > 0)
+        // ── 2. 주변 플레이어 구조물 감지 → 가장 가까운 구조물 우선 타겟 ──
         if (StructureCount > 0 && distSqr > 2.25f && SuppressStructureDetection[index] == 0)
         {
             float nearestSqr = StructureDetectRangeSqr;
-            int   nearestIdx = -1;
+            int nearestIdx = -1;
 
             for (int s = 0; s < StructureCount; s++)
             {
-                Vector3 sp  = StructurePositions[s];
-                float   sdx = sp.x - currentPos.x;
-                float   sdz = sp.z - currentPos.z;
-                float   ssqr = sdx * sdx + sdz * sdz;
+                Vector3 sp = StructurePositions[s];
+                float sdx = sp.x - currentPos.x;
+                float sdz = sp.z - currentPos.z;
+                float ssqr = sdx * sdx + sdz * sdz;
 
                 if (ssqr >= nearestSqr) continue;
 
-                // 구조물이 플레이어 방향과 같은 쪽인지 내적으로 판별 (sqrt 불필요)
                 float dotFwd = sdx * toTarget.x + sdz * toTarget.z;
-                if (dotFwd <= 0f) continue; // 뒤쪽 구조물은 무시
+                if (dotFwd <= 0f) continue;
 
                 nearestSqr = ssqr;
                 nearestIdx = s;
@@ -128,7 +122,6 @@ public struct EnemyMovementJob : IJobParallelForTransform
                 Vector3 toStruct = new Vector3(sp.x - currentPos.x, 0, sp.z - currentPos.z);
                 if (toStruct.sqrMagnitude > 0.001f)
                     desiredDir = (Vector3)math.normalize(toStruct);
-                // distSqr는 플레이어 기준이므로 구조물이 대상일 때 속도 차단 기준 재사용
             }
         }
 
@@ -138,15 +131,15 @@ public struct EnemyMovementJob : IJobParallelForTransform
             Vector3 rightVector = new Vector3(desiredDir.z, 0, -desiredDir.x);
             float sway = math.sin(ElapsedTime * 2.0f + index * 7.13f) * 0.1f;
             desiredDir += rightVector * sway;
-            desiredDir  = (Vector3)math.normalize(desiredDir);
+            desiredDir = (Vector3)math.normalize(desiredDir);
         }
 
-        float trueGroundY  = downHit.colliderEntityId != 0 ? downHit.point.y : -999f;
+        float trueGroundY = downHit.colliderEntityId != 0 ? downHit.point.y : -999f;
         float targetGroundY = trueGroundY;
 
         // ── 4. 분리력 ─────────────────────────────────────────────────────────
-        Vector3 separation  = Vector3.zero;
-        float   sepRadiusSqr = SeparationRadius * SeparationRadius;
+        Vector3 separation = Vector3.zero;
+        float sepRadiusSqr = SeparationRadius * SeparationRadius;
 
         for (int cx = -1; cx <= 1; cx++)
         {
@@ -164,9 +157,9 @@ public struct EnemyMovementJob : IJobParallelForTransform
                         checkCount++;
                         if (checkCount > 16) break;
 
-                        Vector3 otherPos    = AllEnemyPositions[otherIdx];
-                        Vector3 diff        = currentPos - otherPos;
-                        float   sqrDistXZ   = diff.x * diff.x + diff.z * diff.z;
+                        Vector3 otherPos = AllEnemyPositions[otherIdx];
+                        Vector3 diff = currentPos - otherPos;
+                        float sqrDistXZ = diff.x * diff.x + diff.z * diff.z;
 
                         if (sqrDistXZ < sepRadiusSqr && math.abs(diff.y) < 1.5f && sqrDistXZ > 0.001f)
                         {
@@ -181,31 +174,27 @@ public struct EnemyMovementJob : IJobParallelForTransform
 
         if (separation.sqrMagnitude > 4.0f) separation = separation.normalized * 2.0f;
 
-        float currentYVel  = YVelocities[index];
-        float stopDistSqr  = 2.0f;
+        float currentYVel = YVelocities[index];
+        float stopDistSqr = 2.0f;
         float currentSpeed = (distSqr < stopDistSqr) ? 0f : Speeds[index];
 
         Vector3 xzVelocity = (desiredDir * currentSpeed) + (separation * SeparationWeight);
 
-        // 탑 쌓기 방지 — 타겟 3m 이내에서 접선 힘 추가
         if (distSqr > 0.1f && distSqr < 9.0f)
         {
-            float dist     = math.sqrt(distSqr);
+            float dist = math.sqrt(distSqr);
             Vector3 radial = new Vector3(toTarget.x / dist, 0f, toTarget.z / dist);
-            Vector3 tangentCW  = new Vector3(radial.z,  0f, -radial.x);
-            Vector3 tangentCCW = new Vector3(-radial.z, 0f,  radial.x);
-            float cwDot  = separation.x * tangentCW.x  + separation.z * tangentCW.z;
+            Vector3 tangentCW = new Vector3(radial.z, 0f, -radial.x);
+            Vector3 tangentCCW = new Vector3(-radial.z, 0f, radial.x);
+            float cwDot = separation.x * tangentCW.x + separation.z * tangentCW.z;
             float ccwDot = separation.x * tangentCCW.x + separation.z * tangentCCW.z;
-            Vector3 chosenTangent  = (cwDot >= ccwDot) ? tangentCW : tangentCCW;
-            float   tangentStrength = math.max(0f, 1f - dist / 3.0f) * Speeds[index] * 0.8f;
+            Vector3 chosenTangent = (cwDot >= ccwDot) ? tangentCW : tangentCCW;
+            float tangentStrength = math.max(0f, 1f - dist / 3.0f) * Speeds[index] * 0.8f;
             xzVelocity.x += chosenTangent.x * tangentStrength;
             xzVelocity.z += chosenTangent.z * tangentStrength;
         }
 
-        // ── 5. 전방 레이캐스트 슬라이딩 (서브-셀 정밀도 장애물 회피) ──────────
-        // 전방 레이캐스트 슬라이딩
-        // stopDist: 이 거리 이하 진입 시 벽쪽 속도 성분 제거 (갭 결정)
-        // pushDist: 이 거리 이하면 위치도 밀어냄 (최종 최소 갭)
+        // ── 5. 전방 레이캐스트 슬라이딩 ──────────────────────────────────────
         const float stopDist = 0.65f;
         const float pushDist = 0.20f;
         if (fwdHit.colliderEntityId != 0 && fwdHit.distance < stopDist)
@@ -239,12 +228,12 @@ public struct EnemyMovementJob : IJobParallelForTransform
                 currentYVel -= Gravity * dt;
                 float nextY = currentPos.y + currentYVel * dt;
                 if (nextY < targetGroundY) { currentPos.y = targetGroundY; currentYVel = 0f; }
-                else                         currentPos.y = nextY;
+                else currentPos.y = nextY;
             }
             else
             {
                 currentPos.y = targetGroundY;
-                currentYVel  = 0f;
+                currentYVel = 0f;
             }
         }
         else
@@ -256,63 +245,50 @@ public struct EnemyMovementJob : IJobParallelForTransform
         if (targetGroundY != -999f && currentPos.y < targetGroundY)
             currentPos.y = targetGroundY;
 
-        // ── 7. CostField cost==255 차단 ──────────────────────────────────────
+        // ── 7. CostField cost==255 절대 벽 차단 ─────────────────────────────
         if (CostField.IsCreated && GridCols > 0)
         {
             float dtx = xzVelocity.x * dt;
             float dtz = xzVelocity.z * dt;
 
             int nx = (int)math.floor((currentPos.x + dtx - BottomLeft.x) / AiCellSize);
-            int nz = (int)math.floor((currentPos.z           - BottomLeft.z) / AiCellSize);
+            int nz = (int)math.floor((currentPos.z - BottomLeft.z) / AiCellSize);
+
             if (nx >= 0 && nx < GridCols && nz >= 0 && nz < GridRows && CostField[nz * GridCols + nx] == 255)
                 xzVelocity.x = 0f;
 
-            int nx2 = (int)math.floor((currentPos.x           - BottomLeft.x) / AiCellSize);
+            int nx2 = (int)math.floor((currentPos.x - BottomLeft.x) / AiCellSize);
             int nz2 = (int)math.floor((currentPos.z + dtz - BottomLeft.z) / AiCellSize);
             if (nx2 >= 0 && nx2 < GridCols && nz2 >= 0 && nz2 < GridRows && CostField[nz2 * GridCols + nx2] == 255)
                 xzVelocity.z = 0f;
         }
 
-        // ── 7.5. 구조물 표면 정밀 정지 ───────────────────────────────────────────
-        // CostField는 2m 셀 단위이므로 방향별로 0~2m 격차가 생길 수 있음.
-        // 구조물 콜라이더 반지름(StructureHalfExtents)을 기준으로 표면에 닿으면 해당 방향 속도 차단.
+        // ── 7.5. 구조물 표면 정밀 정지 (AABB 사각형 고속 연산) ─────────────────────────
         if (StructureCount > 0)
         {
+            float nextX = currentPos.x + xzVelocity.x * dt;
+            float nextZ = currentPos.z + xzVelocity.z * dt;
+            float zombieRadius = 0.35f;
+
             for (int s = 0; s < StructureCount; s++)
             {
-                Vector3 sp   = StructurePositions[s];
-                float   half = StructureHalfExtents[s] + 0.15f; // 표면 + 소폭 버퍼
-                float   sdx  = sp.x - currentPos.x;
-                float   sdz  = sp.z - currentPos.z;
-                float   sdistSqr = sdx * sdx + sdz * sdz;
+                Vector3 sp = StructurePositions[s];
+                Vector3 extents = StructureExtents[s];
 
-                // 충분히 먼 구조물은 조기 스킵
-                float threshold = half + AiCellSize;
-                if (sdistSqr > threshold * threshold) continue;
-                if (sdistSqr < 0.001f) continue;
+                float dx = math.abs(currentPos.x - sp.x);
+                float dz = math.abs(currentPos.z - sp.z);
+                if (dx > extents.x + AiCellSize || dz > extents.z + AiCellSize) continue;
 
-                float sdist    = math.sqrt(sdistSqr);
-                float invSDist = 1f / sdist;
-                // 적 → 구조물 방향 단위벡터
-                float toSx = sdx * invSDist;
-                float toSz = sdz * invSDist;
+                float distX = math.max(0f, math.abs(nextX - sp.x) - (extents.x + zombieRadius));
+                float distZ = math.max(0f, math.abs(nextZ - sp.z) - (extents.z + zombieRadius));
 
-                // 다음 위치가 구조물 표면 안으로 들어오는지 확인
-                float nextX = currentPos.x + xzVelocity.x * dt;
-                float nextZ = currentPos.z + xzVelocity.z * dt;
-                float ndx   = sp.x - nextX;
-                float ndz   = sp.z - nextZ;
-                float nextDistSqr = ndx * ndx + ndz * ndz;
-
-                if (nextDistSqr < half * half)
+                if (distX <= 0.001f && distZ <= 0.001f)
                 {
-                    // 구조물 방향 속도 성분만 제거 (슬라이딩 유지)
-                    float velDot = xzVelocity.x * toSx + xzVelocity.z * toSz;
-                    if (velDot > 0f)
-                    {
-                        xzVelocity.x -= toSx * velDot;
-                        xzVelocity.z -= toSz * velDot;
-                    }
+                    float overlapX = dx - extents.x;
+                    float overlapZ = dz - extents.z;
+
+                    if (overlapX > overlapZ) xzVelocity.x = 0f;
+                    else xzVelocity.z = 0f;
                 }
             }
         }
@@ -326,9 +302,9 @@ public struct EnemyMovementJob : IJobParallelForTransform
             transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, RotationSpeed * dt);
         }
 
-        AnimStates[index]   = (currentSpeed < 0.2f) ? 2 : 1;
-        YVelocities[index]  = currentYVel;
-        Rotations[index]    = transform.rotation;
-        transform.position  = currentPos;
+        AnimStates[index] = (currentSpeed < 0.2f) ? 2 : 1;
+        YVelocities[index] = currentYVel;
+        Rotations[index] = transform.rotation;
+        transform.position = currentPos;
     }
 }
