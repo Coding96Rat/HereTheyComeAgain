@@ -26,7 +26,28 @@ public struct IntegrationFieldJob : IJob
         NativeQueue<int2> queue = new NativeQueue<int2>(Allocator.Temp);
         int targetIdx = TargetCell.y * GridCols + TargetCell.x;
         IntegrationField[targetIdx] = 0;
-        queue.Enqueue(TargetCell);
+
+        // 구조물 타겟(cost=255)이면 연결된 모든 구조물 셀을 flood-fill로 탐색해
+        // 전부 integration=0으로 seed — 어느 방향에서 오는 적도 동등한 거리로 접근 가능
+        if (CostField[targetIdx] == 255)
+        {
+            NativeQueue<int2> structureFill = new NativeQueue<int2>(Allocator.Temp);
+            structureFill.Enqueue(TargetCell);
+
+            while (structureFill.TryDequeue(out int2 curr))
+            {
+                queue.Enqueue(curr); // 메인 BFS에 추가 — 주변 walkable 셀로 전파
+                ExpandThroughStructure(curr, 0, 1, ref structureFill);
+                ExpandThroughStructure(curr, 0, -1, ref structureFill);
+                ExpandThroughStructure(curr, -1, 0, ref structureFill);
+                ExpandThroughStructure(curr, 1, 0, ref structureFill);
+            }
+            structureFill.Dispose();
+        }
+        else
+        {
+            queue.Enqueue(TargetCell);
+        }
 
         while (queue.TryDequeue(out int2 curr))
         {
@@ -42,6 +63,18 @@ public struct IntegrationFieldJob : IJob
             ProcessNeighbor(curr, -1, -1, 14, currentCost, ref queue); // 좌하
         }
         queue.Dispose();
+    }
+
+    private void ExpandThroughStructure(int2 curr, int dx, int dy, ref NativeQueue<int2> structureQueue)
+    {
+        int nx = curr.x + dx;
+        int ny = curr.y + dy;
+        if (nx < 0 || nx >= GridCols || ny < 0 || ny >= GridRows) return;
+        int nIdx = ny * GridCols + nx;
+        if (CostField[nIdx] != 255) return;           // 구조물 셀만 탐색
+        if (IntegrationField[nIdx] != int.MaxValue) return; // 이미 방문
+        IntegrationField[nIdx] = 0;
+        structureQueue.Enqueue(new int2(nx, ny));
     }
 
     private void ProcessNeighbor(int2 curr, int dx, int dy, int moveCost, int currentCost, ref NativeQueue<int2> queue)
@@ -119,6 +152,7 @@ public struct VectorFieldJob : IJobParallelFor
         if (bfsDir.sqrMagnitude > 0.001f)
         {
             Vector3 cellWorldPos = BottomLeft + new Vector3(cx * AiCellSize + (AiCellSize / 2f), 0, cz * AiCellSize + (AiCellSize / 2f));
+
             Vector3 exactDir = TargetPos - cellWorldPos;
             exactDir.y = 0;
             exactDir = math.normalize(exactDir);

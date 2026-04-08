@@ -32,7 +32,7 @@ Transform:
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
   m_LocalPosition: {x: 0, y: -0, z: 0}
-  m_LocalScale: {x: 3, y: 1, z: 3}
+  m_LocalScale: {x: 4, y: 1, z: 4}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 0}
@@ -146,7 +146,7 @@ MonoBehaviour:
   _initializeOrder: 0
   _preventDespawnOnDisconnect: 0
   _defaultDespawnType: 0
-  _initializedTimestamp: -8584261338752687696
+  _initializedTimestamp: -8584259463825379049
   NetworkObserver: {fileID: 0}
   _enablePrediction: 0
   _predictionType: 0
@@ -169,7 +169,7 @@ MonoBehaviour:
   SerializedTransformProperties:
     Position: {x: 0, y: -0, z: 0}
     Rotation: {x: 0, y: 0, z: 0, w: 1}
-    Scale: {x: 3, y: 2, z: 3}
+    Scale: {x: 3, y: 1, z: 3}
     IsValid: 1
 --- !u!114 &1000579253964474633
 MonoBehaviour:

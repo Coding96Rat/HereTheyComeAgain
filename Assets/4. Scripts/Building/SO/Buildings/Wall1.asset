@@ -16,6 +16,5 @@ MonoBehaviour:
   buildingName: ExWall
   prefab: {fileID: 3847878763289558175, guid: 10ad3358925b45445a1afd8242901688, type: 3}
   icon: {fileID: 0}
-  sizeX: 3
-  sizeZ: 3
-  maxFlattenableTerrainHeight: 5
+  sizeX: 4
+  sizeZ: 4

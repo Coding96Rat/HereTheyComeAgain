@@ -42,8 +42,12 @@ public struct EnemyMovementJob : IJobParallelForTransform
     // 자신의 셀 반경 내에 구조물이 있으면 플레이어 대신 구조물 방향으로 이동
     // 순수 거리·방향 연산 (sqrt 없이 dot²으로 방향 판별)
     [ReadOnly] public NativeArray<Vector3> StructurePositions;
+    [ReadOnly] public NativeArray<float>   StructureHalfExtents; // 구조물별 콜라이더 반지름 (표면 정밀 정지용)
     [ReadOnly] public int StructureCount;
     [ReadOnly] public float StructureDetectRangeSqr; // (AiCellSize * DetectCellRadius)²
+
+    // Attack 상태에서 플레이어로 커밋된 적의 구조물 감지 억제 (1 = 억제)
+    [ReadOnly] public NativeArray<byte> SuppressStructureDetection;
 
     public void Execute(int index, TransformAccess transform)
     {
@@ -51,6 +55,7 @@ public struct EnemyMovementJob : IJobParallelForTransform
         int tIdx = TargetIndices[index];
 
         Vector3 targetPos = (tIdx >= 0 && tIdx < ActiveTargetPositions.Length) ? ActiveTargetPositions[tIdx] : currentPos;
+
         float dt = DeltaTime;
 
         RaycastHit downHit = RaycastHits[index * 2];
@@ -92,9 +97,10 @@ public struct EnemyMovementJob : IJobParallelForTransform
         }
 
         // ── 2. 주변 플레이어 구조물 감지 → 경로 상 가장 가까운 구조물 우선 타겟 ──
+        // Attack 상태에서 플레이어를 추적 중인 적은 구조물 감지를 억제 (버그 2 수정)
         // 탐지 방법: 순수 거리² + 방향 내적² (sqrt 없이 방향 판별)
         // 조건: 탐지 반경 내 + 플레이어 방향과 동일 반구 (dot > 0)
-        if (StructureCount > 0 && distSqr > 2.25f)
+        if (StructureCount > 0 && distSqr > 2.25f && SuppressStructureDetection[index] == 0)
         {
             float nearestSqr = StructureDetectRangeSqr;
             int   nearestIdx = -1;
@@ -175,8 +181,9 @@ public struct EnemyMovementJob : IJobParallelForTransform
 
         if (separation.sqrMagnitude > 4.0f) separation = separation.normalized * 2.0f;
 
-        float currentYVel   = YVelocities[index];
-        float currentSpeed  = (distSqr < 2.0f) ? 0f : Speeds[index];
+        float currentYVel  = YVelocities[index];
+        float stopDistSqr  = 2.0f;
+        float currentSpeed = (distSqr < stopDistSqr) ? 0f : Speeds[index];
 
         Vector3 xzVelocity = (desiredDir * currentSpeed) + (separation * SeparationWeight);
 
@@ -249,8 +256,7 @@ public struct EnemyMovementJob : IJobParallelForTransform
         if (targetGroundY != -999f && currentPos.y < targetGroundY)
             currentPos.y = targetGroundY;
 
-        // ── 7. CostField cost==255 차단 (FlowField Bake에 포함된 영구 장애물) ──
-        // X/Z 독립 검사로 벽 슬라이딩 허용. 물리 연산 0회 — 배열 인덱싱만 사용.
+        // ── 7. CostField cost==255 차단 ──────────────────────────────────────
         if (CostField.IsCreated && GridCols > 0)
         {
             float dtx = xzVelocity.x * dt;
@@ -265,6 +271,50 @@ public struct EnemyMovementJob : IJobParallelForTransform
             int nz2 = (int)math.floor((currentPos.z + dtz - BottomLeft.z) / AiCellSize);
             if (nx2 >= 0 && nx2 < GridCols && nz2 >= 0 && nz2 < GridRows && CostField[nz2 * GridCols + nx2] == 255)
                 xzVelocity.z = 0f;
+        }
+
+        // ── 7.5. 구조물 표면 정밀 정지 ───────────────────────────────────────────
+        // CostField는 2m 셀 단위이므로 방향별로 0~2m 격차가 생길 수 있음.
+        // 구조물 콜라이더 반지름(StructureHalfExtents)을 기준으로 표면에 닿으면 해당 방향 속도 차단.
+        if (StructureCount > 0)
+        {
+            for (int s = 0; s < StructureCount; s++)
+            {
+                Vector3 sp   = StructurePositions[s];
+                float   half = StructureHalfExtents[s] + 0.15f; // 표면 + 소폭 버퍼
+                float   sdx  = sp.x - currentPos.x;
+                float   sdz  = sp.z - currentPos.z;
+                float   sdistSqr = sdx * sdx + sdz * sdz;
+
+                // 충분히 먼 구조물은 조기 스킵
+                float threshold = half + AiCellSize;
+                if (sdistSqr > threshold * threshold) continue;
+                if (sdistSqr < 0.001f) continue;
+
+                float sdist    = math.sqrt(sdistSqr);
+                float invSDist = 1f / sdist;
+                // 적 → 구조물 방향 단위벡터
+                float toSx = sdx * invSDist;
+                float toSz = sdz * invSDist;
+
+                // 다음 위치가 구조물 표면 안으로 들어오는지 확인
+                float nextX = currentPos.x + xzVelocity.x * dt;
+                float nextZ = currentPos.z + xzVelocity.z * dt;
+                float ndx   = sp.x - nextX;
+                float ndz   = sp.z - nextZ;
+                float nextDistSqr = ndx * ndx + ndz * ndz;
+
+                if (nextDistSqr < half * half)
+                {
+                    // 구조물 방향 속도 성분만 제거 (슬라이딩 유지)
+                    float velDot = xzVelocity.x * toSx + xzVelocity.z * toSz;
+                    if (velDot > 0f)
+                    {
+                        xzVelocity.x -= toSx * velDot;
+                        xzVelocity.z -= toSz * velDot;
+                    }
+                }
+            }
         }
 
         currentPos.x += xzVelocity.x * dt;

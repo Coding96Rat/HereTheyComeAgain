@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using FishNet.Object;
 using Unity.Mathematics;
@@ -18,10 +19,17 @@ using UnityEngine;
 ///  3. 체력 0 → RestoreCells(cost=1) → ServerManager.Despawn
 ///  4. OnStopNetwork : All 제거 (클라이언트도 동일 실행)
 /// </summary>
-public class PlacedStructure : NetworkBehaviour
+public class PlacedStructure : NetworkBehaviour, IPlayerRelated
 {
     [Header("구조물 체력")]
     public float maxHealth = 500f;
+
+    // ─── IPlayerRelated ───────────────────────────────────────────────────────
+    public Transform GetTransform() => transform;
+    public bool IsAlive => _health > 0f;
+
+    // 구조물 파괴 시 모든 EnemyMother가 타겟 슬롯을 해제할 수 있도록 알림
+    public static event Action<PlacedStructure> OnAnyDestroyed;
 
     /// <summary>적 1명이 초당 가하는 대미지 (EnemyMother에서 참조).</summary>
     public const float DamagePerEnemyPerSecond = 30f;
@@ -52,7 +60,7 @@ public class PlacedStructure : NetworkBehaviour
         All.Add(this);
 
         // FlowField 셀 마킹 — 적이 이 구조물을 우회하거나 탐지할 수 있도록
-        _ffs = Object.FindFirstObjectByType<FlowFieldSystem>();
+        _ffs = UnityEngine.Object.FindFirstObjectByType<FlowFieldSystem>();
         if (_ffs != null && _ffs.CostField.IsCreated)
             RegisterCells();
     }
@@ -66,6 +74,10 @@ public class PlacedStructure : NetworkBehaviour
         RestoreCells();
     }
 
+    // ─── 콜라이더 반지름 (EnemyMother → EnemyMovementJob 전달용) ──────────────
+    /// <summary>XZ 평면 기준 콜라이더 최대 반지름 (구조물 표면까지 거리 추정).</summary>
+    public float ColliderHalfExtent { get; private set; } = 1f;
+
     // ─── FlowField 셀 등록 ────────────────────────────────────────────────────
 
     private void RegisterCells()
@@ -78,6 +90,8 @@ public class PlacedStructure : NetworkBehaviour
         }
 
         Bounds b = col.bounds;
+        // 콜라이더 bounds에서 XZ 반지름 계산 (EnemyMovementJob 정밀 정지용)
+        ColliderHalfExtent = Mathf.Max(b.extents.x, b.extents.z);
         int x0 = Mathf.FloorToInt((b.min.x - _ffs.BottomLeft.x) / _ffs.aiCellSize);
         int x1 = Mathf.FloorToInt((b.max.x - _ffs.BottomLeft.x) / _ffs.aiCellSize);
         int z0 = Mathf.FloorToInt((b.min.z - _ffs.BottomLeft.z) / _ffs.aiCellSize);
@@ -117,6 +131,7 @@ public class PlacedStructure : NetworkBehaviour
 
         // 파괴 전에 FlowField 복구 (OnStopNetwork보다 먼저 실행해 경로를 즉시 열어줌)
         RestoreCells();
+        OnAnyDestroyed?.Invoke(this);
         ServerManager.Despawn(NetworkObject);
     }
 }

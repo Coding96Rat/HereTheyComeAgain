@@ -358,7 +358,7 @@ public class PlayerInteractor : NetworkBehaviour
 #if UNITY_EDITOR
             Debug.Log(isHeadshot ? $"[HEADSHOT] {damage} 데미지" : $"[Hit] {damage} 데미지");
 #endif
-            closestEnemy.TakeDamage(damage);
+            closestEnemy.TakeDamage(damage, this.transform);
         }
     }
 

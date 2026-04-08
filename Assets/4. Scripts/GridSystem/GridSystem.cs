@@ -10,7 +10,6 @@ public class GridSystem : MonoBehaviour
     [SerializeField] private int _cellSize = 1;
 
     [Header("Bake Settings")]
-    [Tooltip("������ �ν��� ���̾ �����ϼ��� (��: Wall)")]
     public LayerMask obstacleLayer;
 
     public static GridSystem Instance { get; private set; }
@@ -20,11 +19,9 @@ public class GridSystem : MonoBehaviour
     public int Columns => _columns;
     public int CellSize => _cellSize;
 
-    // �ٽ� ����ȭ: 225�� ���� Ŭ������ �����ϴ� ���, ���ŵ� ĭ�� '�ε��� ��ȣ'�� ������ �����մϴ�.
     [HideInInspector]
     [SerializeField] private List<int> _occupiedIndices = new List<int>();
 
-    // ���� ����(Play) �߿��� �����Ǵ� �ʰ淮 2���� �޸� ��
     private bool[,] _runtimeGrid;
 
     void Awake()
@@ -75,14 +72,14 @@ public class GridSystem : MonoBehaviour
                 }
             }
         }
-        Debug.Log($"[GridSystem] �� ��ĵ �Ϸ�. �� {_columns * _rows}ĭ �� {hitCount}ĭ�� ������ �νĵǾ� ����Ǿ����ϴ�.");
+        Debug.Log($"[GridSystem] Baked.");
     }
 
     public void ClearGrid()
     {
         _occupiedIndices.Clear();
         _runtimeGrid = null;
-        Debug.Log("[GridSystem] ��� ���� �����Ͱ� �����Ǿ����ϴ�.");
+        Debug.Log("[GridSystem] Cleared.");
     }
 
     // ���������� ĳ�� �뵵�� ���� �ϴ� ��ǥ�� ����ؼ� �����մϴ�.
@@ -93,13 +90,11 @@ public class GridSystem : MonoBehaviour
         return _middlePoint - new Vector3(halfWidth, 0, halfHeight);
     }
 
-    // �߾� ����(MiddlePoint)�� �������� �� ���� ��ǥ ���
     public Vector3 GetWorldPosition(int x, int z)
     {
         return new Vector3(x, 0, z) * _cellSize + GetBottomLeft();
     }
 
-    // ���� ��ǥ�� �ٽ� �迭�� x, z �ε����� ��ȯ
     public void GetGridPosition(Vector3 worldPosition, out int x, out int z)
     {
         Vector3 bl = GetBottomLeft();

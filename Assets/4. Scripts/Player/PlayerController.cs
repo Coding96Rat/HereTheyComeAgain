@@ -4,8 +4,12 @@ using UnityEngine;
 using Unity.Cinemachine;
 using System.Collections;
 
-public class PlayerController : NetworkBehaviour
+public class PlayerController : NetworkBehaviour, IPlayerRelated
 {
+    // ─── IPlayerRelated ───────────────────────────────────────────────────────
+    public Transform GetTransform() => transform;
+    public bool IsAlive => gameObject.activeInHierarchy;
+
     [Header("Movement Settings")]
     public float moveSpeed = 5f;
     public float sprintSpeed = 10f;

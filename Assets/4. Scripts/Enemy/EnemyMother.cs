@@ -73,13 +73,36 @@ public class EnemyMother : NetworkBehaviour
     private NativeArray<float>     _timeOffsetBuffer;
 
     // 구조물 감지용 — EnemyMovementJob에 NativeArray로 전달 (매 프레임 갱신)
-    private NativeArray<Vector3> _structurePositions; // 최대 64개 구조물
+    private NativeArray<Vector3> _structurePositions;    // 최대 64개 구조물 위치
+    private NativeArray<float>   _structureHalfExtents; // 구조물별 콜라이더 반지름 (정밀 정지용)
     private int _activeStructureCount;
     private const int MaxStructures = 64;
 
     // 전방 레이캐스트 파라미터 — 건물·벽 레이어 포함 (Inspector에서 _wallDetectionLayer 설정)
     [SerializeField] private LayerMask _wallDetectionLayer;
     private QueryParameters _forwardQueryParams;
+
+    // ─── 동적 타겟 슬롯 (구조물 전용, 인덱스 4~35) ───────────────────────────
+    // _activeTargetPositions[0..3] = 플레이어, [4..4+MaxDynamicTargets-1] = 구조물/기타
+    private const int MaxDynamicTargets = 32;
+    private readonly Dictionary<Transform, int> _dynamicSlotMap = new Dictionary<Transform, int>();
+    private readonly bool[] _dynamicSlotInUse = new bool[MaxDynamicTargets];
+
+    // ─── 스태거드 AI 틱 — 200개/프레임씩 처리 ────────────────────────────────
+    private int _aiTickCursor;
+    private const int AiTickBatchSize = 200;
+
+    // ─── Job 안전 쓰기 큐 ──────────────────────────────────────────────────
+    // PlayerInteractor.Update 등에서 Job 실행 중 NativeArray에 직접 쓰는 것을 방지.
+    // Complete() 이후 Update 초입에 일괄 적용.
+    private readonly Queue<(int listIndex, int slot)> _pendingTargetIndexChanges
+        = new Queue<(int, int)>();
+    private readonly Queue<(int listIndex, byte value)> _pendingSuppressChanges
+        = new Queue<(int, byte)>();
+
+    // ─── 구조물 감지 억제 플래그 ──────────────────────────────────────────
+    // Attack 상태에서 플레이어로 커밋된 적이 가까운 구조물 방향으로 끌려가지 않도록
+    private NativeArray<byte> _suppressStructureDetection;
 
     // GPU 렌더링 변수
     private MaterialPropertyBlock _mpb;
@@ -164,12 +187,13 @@ public class EnemyMother : NetworkBehaviour
         enemy.motherListIndex = newIndex;
 
         _transformAccessArray.Add(enemy.transform);
-        _targetIndices[newIndex] = enemy.GetTargetIndex();
-        _yVelocities[newIndex] = 0f;
-        _animStates[newIndex] = 0;
-        _currentPositions[newIndex] = enemy.transform.position; // 첫 프레임 렌더링 위치 초기화
-        _currentRotations[newIndex] = enemy.transform.rotation;
-        _speeds[newIndex] = enemy.speed;
+        _targetIndices[newIndex]              = enemy.GetTargetIndex();
+        _yVelocities[newIndex]                = 0f;
+        _animStates[newIndex]                 = 0;
+        _currentPositions[newIndex]           = enemy.transform.position;
+        _currentRotations[newIndex]           = enemy.transform.rotation;
+        _speeds[newIndex]                     = enemy.speed;
+        _suppressStructureDetection[newIndex] = 0;
     }
 
     private void ExecuteRemoveEnemy(Enemy enemy)
@@ -192,12 +216,13 @@ public class EnemyMother : NetworkBehaviour
             Enemies.RemoveAt(lastIndex);
 
             _transformAccessArray.RemoveAtSwapBack(removeIndex);
-            _targetIndices[removeIndex] = _targetIndices[lastIndex];
-            _yVelocities[removeIndex] = _yVelocities[lastIndex];
-            _animStates[removeIndex] = _animStates[lastIndex];
-            _currentPositions[removeIndex] = _currentPositions[lastIndex];
-            _currentRotations[removeIndex] = _currentRotations[lastIndex];
-            _speeds[removeIndex] = _speeds[lastIndex];
+            _targetIndices[removeIndex]              = _targetIndices[lastIndex];
+            _yVelocities[removeIndex]                = _yVelocities[lastIndex];
+            _animStates[removeIndex]                 = _animStates[lastIndex];
+            _currentPositions[removeIndex]           = _currentPositions[lastIndex];
+            _currentRotations[removeIndex]           = _currentRotations[lastIndex];
+            _speeds[removeIndex]                     = _speeds[lastIndex];
+            _suppressStructureDetection[removeIndex] = _suppressStructureDetection[lastIndex];
         }
         enemy.motherListIndex = -1;
     }
@@ -316,6 +341,7 @@ public class EnemyMother : NetworkBehaviour
     {
         base.OnStopNetwork();
         AllMothers.Remove(this);
+        PlacedStructure.OnAnyDestroyed -= OnStructureDestroyed;
         // 네트워크에서 분리될 때 Job 완전 정리
         _movementJobHandle.Complete();
         _hashJobHandle.Complete();
@@ -339,7 +365,9 @@ public class EnemyMother : NetworkBehaviour
         if (_matricesBuffer.IsCreated)      _matricesBuffer.Dispose();
         if (_isWalkingBuffer.IsCreated)     _isWalkingBuffer.Dispose();
         if (_timeOffsetBuffer.IsCreated)    _timeOffsetBuffer.Dispose();
-        if (_structurePositions.IsCreated)  _structurePositions.Dispose();
+        if (_structurePositions.IsCreated)          _structurePositions.Dispose();
+        if (_structureHalfExtents.IsCreated)        _structureHalfExtents.Dispose();
+        if (_suppressStructureDetection.IsCreated)  _suppressStructureDetection.Dispose();
     }
 
     public override void OnStartNetwork()
@@ -363,14 +391,16 @@ public class EnemyMother : NetworkBehaviour
         _animStates = new NativeArray<int>(maxActiveEnemies, Allocator.Persistent);
         _spatialGrid = new NativeParallelMultiHashMap<int, int>(maxActiveEnemies, Allocator.Persistent);
         _targetIndices = new NativeArray<int>(maxActiveEnemies, Allocator.Persistent);
-        _activeTargetPositions = new NativeArray<Vector3>(4, Allocator.Persistent);
+        _activeTargetPositions = new NativeArray<Vector3>(4 + MaxDynamicTargets, Allocator.Persistent);
         _speeds = new NativeArray<float>(maxActiveEnemies, Allocator.Persistent);
 
         // P2: 렌더링 빌드 버퍼 (Worker Thread에서 TRS 계산 결과를 받는 저장소)
         _matricesBuffer    = new NativeArray<Matrix4x4>(maxActiveEnemies, Allocator.Persistent);
         _isWalkingBuffer   = new NativeArray<float>(maxActiveEnemies, Allocator.Persistent);
         _timeOffsetBuffer  = new NativeArray<float>(maxActiveEnemies, Allocator.Persistent);
-        _structurePositions = new NativeArray<Vector3>(MaxStructures, Allocator.Persistent);
+        _structurePositions         = new NativeArray<Vector3>(MaxStructures, Allocator.Persistent);
+        _structureHalfExtents       = new NativeArray<float>(MaxStructures, Allocator.Persistent);
+        _suppressStructureDetection = new NativeArray<byte>(maxActiveEnemies, Allocator.Persistent);
 
         if (enemyPrefab != null && enemyPrefab.TryGetComponent(out Enemy prefabEnemy) && prefabEnemy.data != null)
         {
@@ -412,6 +442,8 @@ public class EnemyMother : NetworkBehaviour
             if (config != null) Configure(config);
         }
 
+        PlacedStructure.OnAnyDestroyed += OnStructureDestroyed;
+
         // Wave 시작 여부 결정 (서버만 SpawnWaveRoutine 실행)
         // StageHandler 없음  → 기존 동작 그대로 자동 시작
         // StageHandler 있음  → ShouldStartWave AND 해당 Mother isActive 일 때만 시작
@@ -452,16 +484,30 @@ public class EnemyMother : NetworkBehaviour
         _movementJobHandle.Complete();
         _hashJobHandle.Complete();
 
+        // 1b. Job 완료 후 NativeArray 지연 쓰기 일괄 적용
+        //     (PlayerInteractor 등이 Job 실행 중 직접 쓰면 AtomicSafety 오류 발생)
+        while (_pendingTargetIndexChanges.Count > 0)
+        {
+            var (listIdx, slot) = _pendingTargetIndexChanges.Dequeue();
+            if (listIdx >= 0 && listIdx < Enemies.Count)
+                _targetIndices[listIdx] = slot;
+        }
+        while (_pendingSuppressChanges.Count > 0)
+        {
+            var (listIdx, val) = _pendingSuppressChanges.Dequeue();
+            if (listIdx >= 0 && listIdx < Enemies.Count)
+                _suppressStructureDetection[listIdx] = val;
+        }
+
         // 2a. 플레이어 구조물 근접 대미지 (서버만)
         // 공간 해시 그리드(_spatialGrid, 이전 프레임 완료)로 O(structures × cells) 조회
         // → 구조물당 최대 MaxDamagePerSecond 캡으로 DPS 일정 유지
-        if (IsServerInitialized && PlacedStructure.All.Count > 0 && Enemies.Count > 0)
+        if (PlacedStructure.All.Count > 0 && Enemies.Count > 0)
         {
             float dt          = Time.deltaTime;
             float dmgPerSec   = PlacedStructure.DamagePerEnemyPerSecond;
             float maxDmg      = PlacedStructure.MaxDamagePerSecond * dt;
-            // 대미지 반경: 건물 중심 기준 최대 4m (반폭 최대 2m + 갭 최대 2m)
-            // 이전 4f(2m)는 3m 큐브(반폭1.5) + 갭(1.2) = 2.7m 로 범위 밖이어서 데미지 0이었음
+            // 대미지 반경: 건물 중심 기준 최대 4m
             float meleeSqr    = 16f; // 4m 반경²
 
             for (int s = 0; s < PlacedStructure.All.Count; s++)
@@ -488,17 +534,30 @@ public class EnemyMother : NetworkBehaviour
                                 Vector3 ep  = _currentPositions[eIdx];
                                 float   ddx = ep.x - sp.x;
                                 float   ddz = ep.z - sp.z;
-                                if (ddx * ddx + ddz * ddz < meleeSqr)
+                                float   dSqr = ddx * ddx + ddz * ddz;
+
+                                // 대미지 (서버만)
+                                if (IsServerInitialized && dSqr < meleeSqr)
                                 {
                                     totalDmg += dmgPerSec * dt;
                                     if (totalDmg >= maxDmg) { done = true; break; }
+                                }
+
+                                // 요구사항 3a: 공격 단계에서 아주 가까운 구조물 → 해당 구조물로 전환
+                                Enemy enemy = Enemies[eIdx];
+                                if (enemy.State == EnemyAIState.Attack
+                                    && enemy.CommittedTarget != str.transform)
+                                {
+                                    float attackRangeSqr = enemy.data.attackRange * enemy.data.attackRange;
+                                    if (dSqr < attackRangeSqr)
+                                        CommitEnemyToTarget(enemy, str.transform);
                                 }
                             }
                             while (_spatialGrid.TryGetNextValue(out eIdx, ref it));
                         }
                     }
                 }
-                if (totalDmg > 0f) str.TakeDamage(totalDmg);
+                if (IsServerInitialized && totalDmg > 0f) str.TakeDamage(totalDmg);
             }
         }
 
@@ -523,12 +582,21 @@ public class EnemyMother : NetworkBehaviour
 
         if (Enemies.Count == 0) return;
 
-        // 3. 타겟 위치 갱신
+        // 3. 타겟 위치 갱신 — 플레이어(0..3) + 동적 슬롯(4..35)
         for (int i = 0; i < ValidTargets.Count && i < 4; i++)
         {
             if (ValidTargets[i] != null && ValidTargets[i].gameObject.activeInHierarchy)
                 _activeTargetPositions[i] = ValidTargets[i].position;
         }
+        // 동적 슬롯(구조물 등) 위치 갱신 — Dictionary 열거는 struct Enumerator, GC Alloc 없음
+        foreach (var kvp in _dynamicSlotMap)
+        {
+            if (kvp.Key != null && kvp.Key.gameObject.activeInHierarchy)
+                _activeTargetPositions[kvp.Value] = kvp.Key.position;
+        }
+
+        // 3c. 스태거드 AI 틱 — 어그로 상태 전환 처리 (200개/프레임)
+        TickAIStates();
 
         // 3b. 구조물 위치 배열 갱신 (Job에 ReadOnly로 넘김 — 매 프레임 갱신, GC Alloc 없음)
         _activeStructureCount = 0;
@@ -536,7 +604,11 @@ public class EnemyMother : NetworkBehaviour
         {
             var s = PlacedStructure.All[i];
             if (s != null && s.gameObject.activeInHierarchy)
-                _structurePositions[_activeStructureCount++] = s.transform.position;
+            {
+                _structurePositions[_activeStructureCount]  = s.transform.position;
+                _structureHalfExtents[_activeStructureCount] = s.ColliderHalfExtent;
+                _activeStructureCount++;
+            }
         }
 
         _spatialGrid.Clear();
@@ -625,10 +697,12 @@ public class EnemyMother : NetworkBehaviour
             // cost==255 셀 진입 차단 — 영구 장애물 통과 방지 (물리 연산 0회)
             CostField  = (_ffs != null && _ffs.CostField.IsCreated) ? _ffs.CostField : default,
             // 구조물 감지 — 탐지 반경 내 플레이어 구조물 방향으로 이동 방향 전환
-            StructurePositions      = _structurePositions,
-            StructureCount          = _activeStructureCount,
-            StructureDetectRangeSqr = (_ffs != null ? _ffs.aiCellSize * 4f : 8f) *
-                                      (_ffs != null ? _ffs.aiCellSize * 4f : 8f)  // 4셀 반경²
+            StructurePositions           = _structurePositions,
+            StructureHalfExtents         = _structureHalfExtents,
+            StructureCount               = _activeStructureCount,
+            StructureDetectRangeSqr      = (_ffs != null ? _ffs.aiCellSize * 4f : 8f) *
+                                           (_ffs != null ? _ffs.aiCellSize * 4f : 8f),  // 4셀 반경²
+            SuppressStructureDetection   = _suppressStructureDetection
         };
 
         _movementJobHandle = moveJob.Schedule(_transformAccessArray, combinedHandle);
@@ -695,6 +769,211 @@ public class EnemyMother : NetworkBehaviour
         if (IsServerInitialized) return;
 
         StartCoroutine(SpawnEnemyLocal(seed, spawnCount));
+    }
+
+    // ─── 동적 타겟 슬롯 관리 ─────────────────────────────────────────────────
+
+    private int GetOrAssignTargetSlot(Transform target)
+    {
+        // 플레이어 슬롯 (0..3)
+        int playerIdx = ValidTargets.IndexOf(target);
+        if (playerIdx >= 0) return playerIdx;
+
+        // 이미 배정된 동적 슬롯
+        if (_dynamicSlotMap.TryGetValue(target, out int existing)) return existing;
+
+        // 빈 슬롯 배정
+        for (int i = 0; i < MaxDynamicTargets; i++)
+        {
+            if (!_dynamicSlotInUse[i])
+            {
+                int slot = 4 + i;
+                _dynamicSlotMap[target] = slot;
+                _dynamicSlotInUse[i] = true;
+                _activeTargetPositions[slot] = target.position;
+                return slot;
+            }
+        }
+        return -1; // 슬롯 부족 시 폴백
+    }
+
+    private void ReleaseTargetSlot(Transform target)
+    {
+        if (!_dynamicSlotMap.TryGetValue(target, out int slot)) return;
+        _dynamicSlotMap.Remove(target);
+        _dynamicSlotInUse[slot - 4] = false;
+    }
+
+    /// <summary>
+    /// 적을 특정 타겟으로 커밋. Enemy.cs HandleAttackAggro 콜백 및 AI 틱에서 사용.
+    /// _targetIndices / _suppressStructureDetection 쓰기는 Job 안전성을 위해 큐로 지연.
+    /// </summary>
+    public void CommitEnemyToTarget(Enemy enemy, Transform target)
+    {
+        int slot = GetOrAssignTargetSlot(target);
+        if (slot < 0) return;
+
+        enemy.SetCommittedTarget(target);
+
+        int listIdx = enemy.motherListIndex;
+        if (listIdx < 0 || listIdx >= Enemies.Count) return;
+
+        // 버그 1 수정: Job 실행 중 직접 쓰지 않고 큐에 등록 → Complete() 이후 적용
+        _pendingTargetIndexChanges.Enqueue((listIdx, slot));
+
+        // 버그 2 수정: 플레이어 슬롯(0~3)으로 커밋 시 구조물 감지 억제
+        //              구조물 슬롯(4+)으로 커밋 시 억제 해제
+        byte suppress = (byte)(slot < 4 ? 1 : 0);
+        _pendingSuppressChanges.Enqueue((listIdx, suppress));
+    }
+
+    private void OnStructureDestroyed(PlacedStructure structure)
+    {
+        if (!_dynamicSlotMap.TryGetValue(structure.transform, out int slot)) return;
+
+        // 이 슬롯을 추적하던 적을 초기 플레이어로 폴백
+        // 이 메서드는 EnemyMother.Update() 내 Complete() 이후에 호출되므로 직접 쓰기 안전
+        for (int i = 0; i < Enemies.Count; i++)
+        {
+            if (_targetIndices[i] != slot) continue;
+
+            Enemies[i].OnCommittedTargetDestroyed();
+            _targetIndices[i] = Enemies[i].GetTargetIndex();
+
+            // 버그 1 수정: 파괴된 구조물이 이번 프레임 _structurePositions에 아직 남아있어
+            // Job이 해당 위치로 재유도하는 것을 억제. 다음 AI 틱에서 새 타겟 만나면 자동 해제.
+            _suppressStructureDetection[i] = 1;
+        }
+        ReleaseTargetSlot(structure.transform);
+    }
+
+    // ─── 스태거드 AI 틱 ──────────────────────────────────────────────────────
+
+    private void TickAIStates()
+    {
+        if (Enemies.Count == 0) return;
+
+        int end = Mathf.Min(_aiTickCursor + AiTickBatchSize, Enemies.Count);
+        for (int i = _aiTickCursor; i < end; i++)
+            UpdateSingleEnemyAI(i);
+
+        _aiTickCursor = end >= Enemies.Count ? 0 : end;
+    }
+
+    private void UpdateSingleEnemyAI(int i)
+    {
+        Enemy enemy = Enemies[i];
+        if (enemy.CommittedTarget == null) return;
+
+        Vector3 pos  = _currentPositions[i];
+        Vector3 tp   = enemy.CommittedTarget.position;
+        float dx = tp.x - pos.x, dz = tp.z - pos.z;
+        float distSqr = dx * dx + dz * dz;
+        float attackRangeSqr = enemy.data.attackRange * enemy.data.attackRange;
+
+        switch (enemy.State)
+        {
+            case EnemyAIState.Chase:
+                // 요구사항 1: 마주치는 플레이어 관련 오브젝트 감지 → 즉시 커밋
+                CheckEncounterForEnemy(i, enemy, pos);
+                // 공격 범위 진입 → Attack 전환
+                if (distSqr <= attackRangeSqr)
+                    enemy.TransitionToAttack();
+                break;
+
+            case EnemyAIState.Attack:
+                // 타겟이 멀어지면 Chase로 복귀 + 억제 플래그 해제
+                if (distSqr > attackRangeSqr * 9f)
+                {
+                    enemy.TransitionToChase();
+                    _pendingSuppressChanges.Enqueue((i, 0));
+                }
+                // 요구사항 3a: 다른 플레이어(ValidTarget) 중 아주 가까운 것 → 전환
+                else
+                    CheckProximityAggroFromPlayers(i, enemy, pos, attackRangeSqr);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Chase 상태의 적에게 가장 가까운 플레이어 관련 오브젝트(구조물 / 비할당 플레이어)를 감지해 커밋.
+    /// 이미 커밋된 타겟보다 더 가까운 오브젝트가 있을 때만 전환.
+    /// </summary>
+    private void CheckEncounterForEnemy(int i, Enemy enemy, Vector3 pos)
+    {
+        float encounterRadiusSqr = enemy.data.encounterRadius * enemy.data.encounterRadius;
+
+        // 버그 2 수정: nearestSqr 초기값을 현재 커밋 타겟까지의 거리로 제한.
+        // "현재 커밋 타겟보다 더 가까운 것만 전환" → 플레이어가 구조물 뒤에서 접근해도
+        // 구조물이 더 가까우므로 전환되지 않아 "끌려오는" 현상 방지.
+        float nearestSqr = encounterRadiusSqr;
+        if (enemy.CommittedTarget != null)
+        {
+            Vector3 ct = enemy.CommittedTarget.position;
+            float cdx = ct.x - pos.x, cdz = ct.z - pos.z;
+            float committedDistSqr = cdx * cdx + cdz * cdz;
+            if (committedDistSqr < nearestSqr)
+                nearestSqr = committedDistSqr;
+        }
+
+        Transform nearest = null;
+
+        // 구조물 체크
+        for (int s = 0; s < PlacedStructure.All.Count; s++)
+        {
+            PlacedStructure str = PlacedStructure.All[s];
+            if (str == null || !str.gameObject.activeInHierarchy) continue;
+            if (str.transform == enemy.CommittedTarget) continue;
+
+            Vector3 sp = str.transform.position;
+            float dSqr = (sp.x - pos.x) * (sp.x - pos.x) + (sp.z - pos.z) * (sp.z - pos.z);
+            if (dSqr < nearestSqr)
+            {
+                nearestSqr = dSqr;
+                nearest    = str.transform;
+            }
+        }
+
+        // 비할당 플레이어 체크
+        for (int t = 0; t < ValidTargets.Count && t < 4; t++)
+        {
+            Transform vt = ValidTargets[t];
+            if (vt == null || !vt.gameObject.activeInHierarchy) continue;
+            if (vt == enemy.CommittedTarget) continue;
+
+            Vector3 tp = _activeTargetPositions[t];
+            float dSqr = (tp.x - pos.x) * (tp.x - pos.x) + (tp.z - pos.z) * (tp.z - pos.z);
+            if (dSqr < nearestSqr)
+            {
+                nearestSqr = dSqr;
+                nearest    = vt;
+            }
+        }
+
+        if (nearest != null)
+            CommitEnemyToTarget(enemy, nearest);
+    }
+
+    /// <summary>
+    /// Attack 상태에서 현재 타겟 외 다른 ValidTarget(플레이어)이 공격 범위 이내이면 전환.
+    /// 구조물 근접 전환은 기존 구조물 루프에서 처리.
+    /// </summary>
+    private void CheckProximityAggroFromPlayers(int i, Enemy enemy, Vector3 pos, float attackRangeSqr)
+    {
+        for (int t = 0; t < ValidTargets.Count && t < 4; t++)
+        {
+            Transform vt = ValidTargets[t];
+            if (vt == null || !vt.gameObject.activeInHierarchy) continue;
+            if (vt == enemy.CommittedTarget) continue;
+
+            Vector3 tp = _activeTargetPositions[t];
+            float dSqr = (tp.x - pos.x) * (tp.x - pos.x) + (tp.z - pos.z) * (tp.z - pos.z);
+            if (dSqr < attackRangeSqr)
+            {
+                CommitEnemyToTarget(enemy, vt);
+                return;
+            }
+        }
     }
 
     private IEnumerator SpawnEnemyLocal(int seed, int spawnCount)
