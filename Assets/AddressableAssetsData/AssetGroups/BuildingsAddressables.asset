@@ -1,0 +1,29 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: bbb281ee3bf0b054c82ac2347e9e782c, type: 3}
+  m_Name: BuildingsAddressables
+  m_EditorClassIdentifier: Unity.Addressables.Editor::UnityEditor.AddressableAssets.Settings.AddressableAssetGroup
+  m_GroupName: BuildingsAddressables
+  m_GUID: 17dbf42b18a683a4186e78e43e62512b
+  m_SerializeEntries:
+  - m_GUID: 3c7da06105445a24082c9568490af15e
+    m_Address: Assets/4. Scripts/Building/SO/Buildings/Wall1.asset
+    m_ReadOnly: 0
+    m_SerializedLabels:
+    - Buildings
+    FlaggedDuringContentUpdateRestriction: 0
+  m_ReadOnly: 0
+  m_Settings: {fileID: 11400000, guid: 2ac561b49b341e048af17e15fdcf9079, type: 2}
+  m_SchemaSet:
+    m_Schemas:
+    - {fileID: 11400000, guid: 49c302922a5fce84f9713ed54aaec27d, type: 2}
+    - {fileID: 11400000, guid: 7802c80a0040a564aa48e2d6cee9aed8, type: 2}

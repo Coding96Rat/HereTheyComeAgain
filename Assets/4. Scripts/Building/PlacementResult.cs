@@ -13,5 +13,8 @@ public enum PlacementResult
     Blocked,
 
     /// <summary>그리드 범위 밖.</summary>
-    OutOfBounds
+    OutOfBounds,
+
+    /// <summary>플레이어에서 너무 멀어 설치 불가.</summary>
+    TooFar
 }

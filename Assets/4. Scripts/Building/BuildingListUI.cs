@@ -1,6 +1,9 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.AddressableAssets;
+using UnityEngine.ResourceManagement.AsyncOperations;
 using UnityEngine.UI;
 using TMPro;
 
@@ -10,6 +13,7 @@ using TMPro;
 /// B 키로 빌딩 모드 진입 → Tab 키로 이 패널 토글.
 /// 패널 열릴 때 커서 해제, 닫힐 때 커서 잠금.
 /// BuildingSystem의 프리팹 목록을 기반으로 버튼을 동적 생성.
+/// 아이콘은 AssetReferenceSprite를 통해 on-demand 로드하며, 닫힐 때 핸들 해제.
 /// </summary>
 public class BuildingListUI : MonoBehaviour
 {
@@ -20,6 +24,9 @@ public class BuildingListUI : MonoBehaviour
 
     private CanvasGroup  _canvasGroup;
     private Action<int>  _onBuildingSelected;
+
+    // Addressables 아이콘 핸들 — PopulateList 호출 시 이전 핸들 해제 후 재구성
+    private readonly List<AsyncOperationHandle<Sprite>> _iconHandles = new List<AsyncOperationHandle<Sprite>>();
 
     // ─── 초기화 ───────────────────────────────────────────────────────────────
 
@@ -32,8 +39,14 @@ public class BuildingListUI : MonoBehaviour
         SetVisible(false);
     }
 
+    private void OnDestroy()
+    {
+        ReleaseIconHandles();
+    }
+
     /// <summary>
     /// PlayerInteractor에서 빌딩 모드 진입 시 한 번 호출.
+    /// IsRegistryReady == true 이후에 호출해야 AllBuildings가 채워진다.
     /// </summary>
     public void Initialize(BuildingSystem buildingSystem, Action<int> onBuildingSelected)
     {
@@ -67,13 +80,14 @@ public class BuildingListUI : MonoBehaviour
 
     // ─── 목록 생성 ───────────────────────────────────────────────────────────
 
-    private void PopulateList(IReadOnlyList<BuildingDataSO> buildings)
+    private void PopulateList(IReadOnlyCollection<BuildingDataSO> buildings)
     {
         if (buildings == null || _buttonContainer == null || _buttonPrefab == null) return;
 
-        // 기존 버튼 제거
+        // 기존 버튼 및 아이콘 핸들 제거
         foreach (Transform child in _buttonContainer)
             Destroy(child.gameObject);
+        ReleaseIconHandles();
 
         foreach (var data in buildings)
         {
@@ -85,9 +99,10 @@ public class BuildingListUI : MonoBehaviour
             var label = btnGo.GetComponentInChildren<TextMeshProUGUI>();
             if (label != null) label.text = data.buildingName;
 
-            // 아이콘 설정
+            // 아이콘: Addressables 비동기 로드
             var img = btnGo.GetComponent<Image>();
-            if (img != null && data.icon != null) img.sprite = data.icon;
+            if (img != null && data.iconRef != null && data.iconRef.RuntimeKeyIsValid())
+                StartCoroutine(LoadIconCoroutine(data.iconRef, img));
 
             // 클릭 리스너
             var btn = btnGo.GetComponent<Button>();
@@ -101,5 +116,25 @@ public class BuildingListUI : MonoBehaviour
                 });
             }
         }
+    }
+
+    // ─── 아이콘 로드 / 해제 ──────────────────────────────────────────────────
+
+    private IEnumerator LoadIconCoroutine(AssetReferenceSprite iconRef, Image target)
+    {
+        AsyncOperationHandle<Sprite> handle = iconRef.LoadAssetAsync();
+        _iconHandles.Add(handle);
+
+        yield return handle;
+
+        if (target != null && handle.Status == AsyncOperationStatus.Succeeded)
+            target.sprite = handle.Result;
+    }
+
+    private void ReleaseIconHandles()
+    {
+        foreach (var h in _iconHandles)
+            if (h.IsValid()) Addressables.Release(h);
+        _iconHandles.Clear();
     }
 }

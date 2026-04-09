@@ -15,6 +15,13 @@ MonoBehaviour:
   id: 0
   buildingName: ExWall
   prefab: {fileID: 3847878763289558175, guid: 10ad3358925b45445a1afd8242901688, type: 3}
-  icon: {fileID: 0}
+  iconRef:
+    m_AssetGUID: 
+    m_SubObjectName: 
+    m_SubObjectType: 
+    m_SubObjectGUID: 
+    m_EditorAssetChanged: 0
+  _autoSyncFromPrefab: 1
+  _gridCellSize: 1
   sizeX: 3
   sizeZ: 3

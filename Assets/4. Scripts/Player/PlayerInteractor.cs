@@ -23,6 +23,9 @@ public class PlayerInteractor : NetworkBehaviour
     [Tooltip("빌딩 레이캐스트가 맞을 레이어 (Terrain/Ground)")]
     public LayerMask buildGroundLayer;
 
+    [Tooltip("설치 가능 최대 거리 (XZ 평면 기준, 월드 단위)")]
+    public float maxPlacementDistance = 15f;
+
     private float _nextFireTime = 0f;
 
     public bool IsInteractDetected { get; private set; }
@@ -123,10 +126,10 @@ public class PlayerInteractor : NetworkBehaviour
         if (_cachedBuildingListUI == null)
             _cachedBuildingListUI = Object.FindFirstObjectByType<BuildingListUI>();
 
-        // ── 3. 리스트 UI 초기화: BuildingSystem이 준비됐을 때만 실행 (1회)
-        //       BuildingSystem.Instance가 null이면 이 블록을 건너뛰고
+        // ── 3. 리스트 UI 초기화: 레지스트리 로드가 완료된 후에만 실행 (1회)
+        //       IsRegistryReady가 false면 이 블록을 건너뛰고
         //       다음 B 키 진입 시 다시 시도한다 (_listUIInitialized = false 유지)
-        if (!_listUIInitialized && _cachedBuildingListUI != null && BuildingSystem.Instance != null)
+        if (!_listUIInitialized && _cachedBuildingListUI != null && BuildingSystem.Instance?.IsRegistryReady == true)
         {
             _cachedBuildingListUI.Initialize(BuildingSystem.Instance, OnBuildingSelected);
             _listUIInitialized = true;
@@ -239,6 +242,18 @@ public class PlayerInteractor : NetworkBehaviour
         // 메시 Bounds.center 기준으로 커서 셀 XZ 중앙에 정렬된 Transform 위치
         Vector3 snappedPos = _buildingHelper.GetCenteredSpawnPosition(data, placeX, placeZ);
 
+        // XZ 거리 검사: 범위 초과 시 프리뷰 전체 숨김 (빨간 표시 대신 비표시)
+        float distXZ = Vector2.Distance(
+            new Vector2(transform.position.x, transform.position.z),
+            new Vector2(snappedPos.x, snappedPos.z));
+
+        if (distXZ > maxPlacementDistance)
+        {
+            preview.SetPreviewVisible(false);
+            return;
+        }
+
+        preview.SetPreviewVisible(true);
         PlacementResult result = _buildingHelper.CheckPlacement(data, placeX, placeZ);
         preview.UpdatePreview(snappedPos, result);
 

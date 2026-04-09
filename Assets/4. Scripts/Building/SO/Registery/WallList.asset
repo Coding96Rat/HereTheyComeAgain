@@ -12,5 +12,5 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 04880f0f98d99ed44b4d84c08112f05a, type: 3}
   m_Name: WallList
   m_EditorClassIdentifier: Assembly-CSharp::BuildingRegistrySO
-  _buildings:
-  - {fileID: 11400000, guid: 3c7da06105445a24082c9568490af15e, type: 2}
+  _buildingLabel:
+    m_LabelString: Buildings

@@ -33,14 +33,16 @@ public class BuildingPreview : MonoBehaviour
     private Material[][]   _cachedCanMats;
     private Material[][]   _cachedCantMats;
 
-    private GridSystem     _gridSystem;
-    private BuildingDataSO _data;
+    private GridSystem              _gridSystem;
+    private BuildingDataSO          _data;
+    private PlacementGridHighlight  _gridHighlight;
 
     // ─── 초기화 ──────────────────────────────────────────────────────────────
 
     public void Setup(GridSystem gridSystem)
     {
-        _gridSystem = gridSystem;
+        _gridSystem    = gridSystem;
+        _gridHighlight = GetComponent<PlacementGridHighlight>();
     }
 
     // ─── 건물 교체 ───────────────────────────────────────────────────────────
@@ -68,9 +70,22 @@ public class BuildingPreview : MonoBehaviour
     {
         DestroyVisual();
         _data = null;
+        _gridHighlight?.Hide();
     }
 
     public bool HasBuilding => _data != null && _visualRoot != null;
+
+    /// <summary>
+    /// 프리뷰 비주얼을 일시적으로 숨기거나 복원한다.
+    /// 데이터와 오브젝트는 유지 — 범위 안으로 돌아오면 UpdatePreview가 즉시 복원.
+    /// </summary>
+    public void SetPreviewVisible(bool visible)
+    {
+        if (_visualRoot != null)
+            _visualRoot.SetActive(visible);
+        if (!visible)
+            _gridHighlight?.Hide();
+    }
 
     // ─── 매 프레임 갱신 ──────────────────────────────────────────────────────
 
@@ -80,6 +95,15 @@ public class BuildingPreview : MonoBehaviour
 
         bool canPlace = result == PlacementResult.Valid;
         ApplyMaterials(canPlace);
+
+        // 그리드 하이라이트: 반경 = Inspector 기본값 + max(sizeX, sizeZ) * cellSize
+        if (_gridSystem != null && _gridHighlight != null && _data != null)
+        {
+            float buildingExtent = Mathf.Max(_data.sizeX, _data.sizeZ) * _gridSystem.CellSize;
+            float dynamicRadius  = _gridHighlight.BaseRadius + buildingExtent;
+            _gridHighlight.Show(snappedPos, _gridSystem.CellSize,
+                                _gridSystem.GetBottomLeft(), dynamicRadius);
+        }
     }
 
     // ─── 내부 헬퍼 ───────────────────────────────────────────────────────────

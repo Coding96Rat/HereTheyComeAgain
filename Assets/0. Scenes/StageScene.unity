@@ -596,6 +596,7 @@ GameObject:
   - component: {fileID: 1251800197}
   - component: {fileID: 1251800196}
   - component: {fileID: 1251800199}
+  - component: {fileID: 1251800200}
   m_Layer: 0
   m_Name: BuildingSystem
   m_TagString: Untagged
@@ -673,6 +674,7 @@ MonoBehaviour:
   _addedNetworkObject: {fileID: 1251800196}
   _networkObjectCache: {fileID: 0}
   _registry: {fileID: 11400000, guid: 7bf4cdd70605a4044b1649488035b66f, type: 2}
+  _maxPlacementDistance: 15
 --- !u!4 &1251800198
 Transform:
   m_ObjectHideFlags: 0
@@ -703,6 +705,23 @@ MonoBehaviour:
   _canPlaceColor: {r: 1, g: 1, b: 1, a: 0.45}
   _cantPlaceColor: {r: 1, g: 0, b: 0, a: 1}
   _heightOffset: 0.02
+--- !u!114 &1251800200
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1251800195}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 225edca7c0631544ba6bd1cfccfa91c0, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::PlacementGridHighlight
+  _radius: 3
+  _fadeStart: 0.824
+  _lineWidth: 0.04
+  _maxAlpha: 0.485
+  _shader: {fileID: 4800000, guid: 1a15061d697dac5499a299ced7deb0ae, type: 3}
 --- !u!1 &1309645421
 GameObject:
   m_ObjectHideFlags: 0
