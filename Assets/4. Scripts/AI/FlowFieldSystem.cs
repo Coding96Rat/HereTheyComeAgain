@@ -6,6 +6,8 @@ using Unity.Mathematics;
 
 public class FlowFieldSystem : MonoBehaviour
 {
+    public static FlowFieldSystem Instance { get; private set; }
+
     [Header("References")]
     private GridSystem _gridSystem;
 
@@ -42,12 +44,15 @@ public class FlowFieldSystem : MonoBehaviour
     // FlowFieldSystem.cs 의 Awake 함수만 아래로 교체하세요.
     private void Awake()
     {
+        if (Instance != null && Instance != this) { Destroy(this); return; }
+        Instance = this;
         _gridSystem = FindFirstObjectByType<GridSystem>();
         Initialize(4); // 💡 서버/클라이언트 무관하게 씬이 켜지면 무조건 배열을 할당하여 크래시 원천 차단
     }
 
     private void OnDestroy()
     {
+        if (Instance == this) Instance = null;
         // 파괴되기 전, 읽고 있는 모든 Job이 끝날 때까지 무조건 대기
         _globalReadersHandle.Complete();
 

@@ -38,13 +38,10 @@ public class GameManager : MonoBehaviour
         // 기본값 30 → 60으로 올려 다른 플레이어 위치 갱신 주기를 렌더 프레임에 맞춤
         if (InstanceFinder.NetworkManager != null)
             InstanceFinder.NetworkManager.TimeManager.SetTickRate(networkTickRate);
-
-        ApplyTAAToMainCamera();
     }
 
     private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
-        ApplyTAAToMainCamera();
     }
 
     // 플레이어 모니터 주사율을 읽어 FrameRate를 자동 설정
@@ -65,15 +62,4 @@ public class GameManager : MonoBehaviour
         Application.targetFrameRate = fps;
     }
 
-    private void ApplyTAAToMainCamera()
-    {
-        Camera mainCam = Camera.main;
-        if (mainCam == null) return;
-
-        var cameraData = mainCam.GetUniversalAdditionalCameraData();
-        if (cameraData == null) return;
-
-        cameraData.antialiasing = AntialiasingMode.TemporalAntiAliasing;
-        cameraData.antialiasingQuality = AntialiasingQuality.High;
-    }
 }
